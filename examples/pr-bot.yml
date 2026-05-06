@@ -40,4 +40,15 @@ jobs:
     # Phase 2 sandbox: pin to main on the sandbox PR-BOT repo (Pitfall 3).
     # Phase 4 transitions to @v1 mutable major tag at the company-org PR-BOT.
     uses: Slaanesh233-sandbox/PR-BOT/.github/workflows/notify.yml@main
+    # The reusable workflow declares `permissions: pull-requests: write,
+    # contents: read` (OPEN-02). When the caller's repo or org has
+    # default_workflow_permissions=read (GitHub's safer default), the caller
+    # job MUST also declare these permissions explicitly — otherwise GitHub
+    # caps the called workflow's grantable permissions at the caller's
+    # ceiling and the run fails at startup with:
+    #   "The workflow is requesting 'pull-requests: write', but is only
+    #    allowed 'pull-requests: none'."
+    permissions:
+      pull-requests: write   # PATCH PR body to inject the marker (OPEN-05)
+      contents: read         # read repo metadata
     secrets: inherit
