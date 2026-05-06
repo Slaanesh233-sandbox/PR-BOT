@@ -21,24 +21,24 @@ Work through the items in order. Each `- [ ]` is a discrete step you can verify 
 
 ### A. GitHub Sandbox Org and Repos (D-08, D-09)
 
-- [ ] **A1.** Create a free personal GitHub org named `kai-sandbox`. URL: <https://github.com/account/organizations/new>. Pick the **Free** plan (Team plan is paid). The name `kai-sandbox` is used throughout the rest of this checklist; if you pick a different name, substitute consistently and record the chosen name in the Captured Values table at the bottom.
+- [ ] **A1.** Create a free personal GitHub org named `Slaanesh233-sandbox`. URL: <https://github.com/account/organizations/new>. Pick the **Free** plan (Team plan is paid). The name `Slaanesh233-sandbox` is used throughout the rest of this checklist; if you pick a different name, substitute consistently and record the chosen name in the Captured Values table at the bottom.
 
-- [ ] **A2.** Push this repository to `kai-sandbox/PR-BOT`. From a local clone of `PR-BOT`, run:
+- [ ] **A2.** Push this repository to `Slaanesh233-sandbox/PR-BOT`. From a local clone of `PR-BOT`, run:
 
       ```sh
-      git remote add sandbox git@github.com:kai-sandbox/PR-BOT.git
+      git remote add sandbox git@github.com:Slaanesh233-sandbox/PR-BOT.git
       git push sandbox main
       ```
 
       > **PAUSED — do not run until remote hosting is confirmed with the user.** The `gh`/`git` CLI on this machine is authenticated against multiple GitHub identities (including a company org), and an accidental push to the wrong remote would create noise in a real company repo. Confirm the target org name and the right SSH/HTTPS identity before running these commands. Until then, leave the `sandbox` remote unconfigured.
 
-- [ ] **A3.** Create two empty sandbox watched repos in the `kai-sandbox` org (D-09): `kai-sandbox/sandbox-repo-a` and `kai-sandbox/sandbox-repo-b`. Each repo is initialized with a `README.md` only. The caller-workflow stub (`.github/workflows/pr-bot.yml`) will be added by Phase 2 — leave the repos empty for now.
+- [ ] **A3.** Create two empty sandbox watched repos in the `Slaanesh233-sandbox` org (D-09): `Slaanesh233-sandbox/sandbox-repo-a` and `Slaanesh233-sandbox/sandbox-repo-b`. Each repo is initialized with a `README.md` only. The caller-workflow stub (`.github/workflows/pr-bot.yml`) will be added by Phase 2 — leave the repos empty for now.
 
 ### B. Cross-Repo Workflow Access (FND-05, D-11)
 
-- [ ] **B1.** Open `https://github.com/kai-sandbox/PR-BOT/settings/actions`.
+- [ ] **B1.** Open `https://github.com/Slaanesh233-sandbox/PR-BOT/settings/actions`.
 - [ ] **B2.** Scroll to the **Access** section.
-- [ ] **B3.** Select the radio button: **"Accessible from repositories in the 'kai-sandbox' organization"**. Click **Save**. (Without this, every cross-repo `uses:` from `sandbox-repo-a` / `sandbox-repo-b` will fail with "could not find workflow" — see PITFALLS.md Pitfall 4 in research notes. This is the FND-05 step that fails silently and burns hours debugging the wrong path if skipped.)
+- [ ] **B3.** Select the radio button: **"Accessible from repositories in the 'Slaanesh233-sandbox' organization"**. Click **Save**. (Without this, every cross-repo `uses:` from `sandbox-repo-a` / `sandbox-repo-b` will fail with "could not find workflow" — see PITFALLS.md Pitfall 4 in research notes. This is the FND-05 step that fails silently and burns hours debugging the wrong path if skipped.)
 
 ### C. Slack Workspace and App (D-10, FND-04)
 
@@ -58,7 +58,7 @@ Work through the items in order. Each `- [ ]` is a discrete step you can verify 
 
 ### D. GitHub Org-Level Secret (FND-04, D-11)
 
-- [ ] **D1.** Open `https://github.com/organizations/kai-sandbox/settings/secrets/actions`.
+- [ ] **D1.** Open `https://github.com/organizations/Slaanesh233-sandbox/settings/secrets/actions`.
 - [ ] **D2.** Click **New organization secret**.
 - [ ] **D3.** Name: `SLACK_BOT_TOKEN`. Value: the `xoxb-…` token from C3 step 5.
 - [ ] **D4.** Repository access: **Selected repositories**. Add exactly these three: `PR-BOT`, `sandbox-repo-a`, `sandbox-repo-b`. Click **Save**. (The allowlist is enforced by GitHub — only these repos' workflow runs can read the secret. Any other repo in the org is denied.)
@@ -77,9 +77,9 @@ You need three IDs for `config/users.yml` and `config/channel.yml` (Plan 03 read
 
 | Key                            | Value                                     | Source |
 | ------------------------------ | ----------------------------------------- | ------ |
-| GitHub sandbox org             | `kai-sandbox`                             | A1     |
-| Sandbox watched repo A         | `kai-sandbox/sandbox-repo-a`              | A3     |
-| Sandbox watched repo B         | `kai-sandbox/sandbox-repo-b`              | A3     |
+| GitHub sandbox org             | `Slaanesh233-sandbox`                             | A1     |
+| Sandbox watched repo A         | `Slaanesh233-sandbox/sandbox-repo-a`              | A3     |
+| Sandbox watched repo B         | `Slaanesh233-sandbox/sandbox-repo-b`              | A3     |
 | Slack workspace name           | `pr-bot-sandbox` (or your chosen name)    | C1     |
 | Slack channel name             | `#pr-bot-sandbox` (or your chosen name)   | C2     |
 | Slack channel ID               | channel: `C__________` _(fill in)_        | E3     |
@@ -90,10 +90,10 @@ You need three IDs for `config/users.yml` and `config/channel.yml` (Plan 03 read
 
 After working through the checklist, verify each end-state independently in the relevant dashboard. The `checkpoint:human-verify` step in Plan 01-02 will ask you to confirm all of the following:
 
-- `kai-sandbox` org exists and the maintainer is **Owner**.
-- `kai-sandbox/PR-BOT`, `kai-sandbox/sandbox-repo-a`, `kai-sandbox/sandbox-repo-b` all exist.
-- `https://github.com/kai-sandbox/PR-BOT/settings/actions` shows **Access: Accessible from repositories in the 'kai-sandbox' organization** (FND-05).
-- `https://github.com/organizations/kai-sandbox/settings/secrets/actions` shows `SLACK_BOT_TOKEN` exists and is restricted to the 3 repos listed in step D4.
+- `Slaanesh233-sandbox` org exists and the maintainer is **Owner**.
+- `Slaanesh233-sandbox/PR-BOT`, `Slaanesh233-sandbox/sandbox-repo-a`, `Slaanesh233-sandbox/sandbox-repo-b` all exist.
+- `https://github.com/Slaanesh233-sandbox/PR-BOT/settings/actions` shows **Access: Accessible from repositories in the 'Slaanesh233-sandbox' organization** (FND-05).
+- `https://github.com/organizations/Slaanesh233-sandbox/settings/secrets/actions` shows `SLACK_BOT_TOKEN` exists and is restricted to the 3 repos listed in step D4.
 - The Slack app `PR-BOT` is installed in the sandbox workspace with bot scopes `chat:write` AND `reactions:write` (visible at <https://api.slack.com/apps> → PR-BOT → OAuth & Permissions → Bot Token Scopes).
 - The bot is a member of `#pr-bot-sandbox` (visible in channel member list, or by re-running `/invite @PR-BOT` and seeing "already in channel").
 - The "Captured Values" table above has all three `U…`/`C…` IDs filled in (no remaining `__________` placeholders for those rows).
