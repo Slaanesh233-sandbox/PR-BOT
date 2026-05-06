@@ -105,9 +105,12 @@ describe('marker.inject', () => {
 
 describe('marker.strip', () => {
   it('removes the marker and leaves the rest of the body intact', () => {
-    const body = ['## Heading', '', 'Body text.', '<!-- pr-bot:thread_ts=1700000000.000100 -->'].join(
-      '\n',
-    );
+    const body = [
+      '## Heading',
+      '',
+      'Body text.',
+      '<!-- pr-bot:thread_ts=1700000000.000100 -->',
+    ].join('\n');
     const result = strip(body);
     expect(result).not.toContain('pr-bot:thread_ts');
     expect(result).toContain('## Heading');

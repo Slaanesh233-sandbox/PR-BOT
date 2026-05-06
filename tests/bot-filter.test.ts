@@ -15,7 +15,7 @@ describe('isBotActor', () => {
     expect(isBotActor({ type: 'Bot', login: 'some-bot-login' })).toBe(true);
   });
 
-  it("returns true for dependabot[bot] (login suffix), regardless of type field", () => {
+  it('returns true for dependabot[bot] (login suffix), regardless of type field', () => {
     expect(isBotActor({ login: 'dependabot[bot]' })).toBe(true);
     // Even if type comes through as 'User' (the pathological case D-04 guards against):
     expect(isBotActor({ type: 'User', login: 'dependabot[bot]' })).toBe(true);

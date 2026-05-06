@@ -65,5 +65,8 @@ export function inject(body: string, ts: ThreadTs): string {
  */
 export function strip(body: string): string {
   if (!MARKER_REGEX.test(body)) return body;
-  return body.replace(MARKER_REGEX, '').replace(/\n{3,}/g, '\n\n').trimEnd();
+  return body
+    .replace(MARKER_REGEX, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd();
 }
