@@ -1,0 +1,6 @@
+dist/
+dist-tsc/
+node_modules/
+package-lock.json
+.planning/
+CLAUDE.md

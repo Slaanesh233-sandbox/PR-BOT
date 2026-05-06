@@ -1,1 +1,21 @@
 .planning/
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist-tsc/
+
+# Test artifacts
+coverage/
+.vitest/
+
+# Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local env
+.env
+.env.local
+.secrets
