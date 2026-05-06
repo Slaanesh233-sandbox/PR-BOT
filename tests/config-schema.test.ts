@@ -40,10 +40,14 @@ describe('config/users.yml on-disk schema', () => {
     }
   });
 
-  it('contains the D-12 sandbox seed entries: kai and dummy-reviewer', () => {
+  it('contains the D-12 sandbox seed entries: the maintainer and dummy-reviewer', () => {
+    // Keys are GitHub LOGINS (matching pull_request.user.login), not first names.
+    // See config/users.yml header comment — original `kai` key produced a runtime
+    // fallback warning during the 2026-05-06 keystone test; corrected to match
+    // the actual GitHub login of the sandbox maintainer.
     const yamlText = readFileSync(resolvePath(repoRoot, 'config/users.yml'), 'utf-8');
     const map = loadUsersMap(yamlText);
-    expect(map.users).toHaveProperty('kai');
+    expect(map.users).toHaveProperty('Slaanesh233');
     expect(map.users).toHaveProperty('dummy-reviewer');
   });
 });

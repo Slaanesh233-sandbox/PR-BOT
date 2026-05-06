@@ -2,15 +2,23 @@
 # moves to the company org.
 #
 # These are real Slack user IDs captured from the personal sandbox workspace
-# (Plan 01-02 Section E). Per Path A: `dummy-reviewer` reuses the same Slack ID as
-# `kai` for now — Phase 1 schema validates regex shape only, and Phase 2 keystone
-# testing can run without a second human. Before Phase 2 reviewer-flow tests
-# (specifically THRD-03), replace `dummy-reviewer` with a real second account's
-# Slack ID and add that GitHub user as a collaborator on the sandbox repos.
+# (Plan 01-02 Section E). Per Path A: `dummy-reviewer` reuses the same Slack ID
+# as the user for now — Phase 1 schema validates regex shape only, and Phase 2
+# keystone testing can run without a second human. Before Phase 2 reviewer-flow
+# tests (specifically THRD-03), replace `dummy-reviewer` with a real second
+# account's Slack ID and add that GitHub user as a collaborator on the sandbox
+# repos.
+#
+# Username convention: keys are GitHub LOGINS (matching `pull_request.user.login`
+# in the webhook payload), NOT first names. The first live keystone test on
+# 2026-05-06 surfaced this — the original `kai` key produced a "no Slack ID
+# mapping for github login 'Slaanesh233'" warning at runtime and the bot fell
+# back to plain `@Slaanesh233` text instead of a real Slack mention. Fixed by
+# using the actual GitHub login as the key.
 #
 # Schema (validated by tests/config-schema.test.ts):
 #   - top-level `users:` map
 #   - each value matches /^U[A-Z0-9]+$/  (D-05, D-14)
 users:
-  kai: U0B20676JVB
+  Slaanesh233: U0B20676JVB
   dummy-reviewer: U0B20676JVB
