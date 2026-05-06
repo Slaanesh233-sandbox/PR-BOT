@@ -14,11 +14,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import {
-  MAX_SECTION_TEXT_LENGTH,
-  buildRootMessage,
-  buildThreadReply,
-} from '../src/lib/blocks.js';
+import { MAX_SECTION_TEXT_LENGTH, buildRootMessage, buildThreadReply } from '../src/lib/blocks.js';
 import type { ResolvedMention } from '../src/lib/types.js';
 
 // Helper: extract the rendered section text from a Block Kit result. The shape is
