@@ -28,7 +28,7 @@ A Slack bot that posts high-signal notifications about pull request activity for
 |------------|---------|---------|-----------------|
 | **Node.js** | 22 LTS | Action runtime | GitHub Actions runners ship Node 22; `setup-node@v6` defaults to it; `@slack/web-api@7` requires Node ≥18 |
 | **TypeScript** | 6.0.3 | Language | Type-safe Octokit + Slack clients; the WebClient method types alone catch ~half the bugs you'd otherwise hit at runtime |
-| **JavaScript Action** (`action.yml` with `runs.using: node20` or `node22`) | n/a | Packaging model | Inline scripts in YAML can't be unit-tested and don't get type checking; a JS action gives us a real codebase that ships as a bundle |
+| **JavaScript Action** (`action.yml` with `runs.using: node20` or `node24`) | n/a | Packaging model | Inline scripts in YAML can't be unit-tested and don't get type checking; a JS action gives us a real codebase that ships as a bundle. Note: `node22` is NOT a supported `runs.using` value — the runner machine runs Node 22 LTS but the action declaration must be `node20` (deprecated track) or `node24` (current default since June 2, 2026). Verified 2026-05-06; see Phase 2 RESEARCH Pitfall 6. |
 | **Reusable workflow** (`.github/workflows/notify.yml` with `on.workflow_call`) | n/a | Distribution model | Lets one repo own the logic for ten — caller workflows are 5-line stubs that pin a version |
 | **Single-file bundle via `@vercel/ncc`** | 0.38.x | Build output | Avoids `npm install` on every runner invocation; ships `dist/index.js` with all deps inlined → ~3-5s startup vs 30-50s with install |
 ### Supporting Libraries (runtime)

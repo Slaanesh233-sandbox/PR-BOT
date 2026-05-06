@@ -1,0 +1,23 @@
+# action.yml — composite-action manifest for direct `uses:` invocation.
+#
+# Phase 2 keystone uses the reusable-workflow path (.github/workflows/notify.yml +
+# examples/pr-bot.yml). This action.yml exists so the Phase 4 fallback —
+# `uses: Slaanesh233-sandbox/PR-BOT@v1` directly inside a caller step — also works
+# without restructuring. See RESEARCH.md Open Question 1.
+#
+# Pitfall 6: the `runs.using` field rejects the string `node` followed by `22` —
+# that value is NOT a supported runtime declaration (verified 2026-05-06 against
+# GitHub Actions docs and the 2025-09-19 Node 20 deprecation changelog). The runner
+# *machine* runs Node 22 LTS but the action *declaration* must be the v20 string
+# (deprecated track) or `node24` (current default starting June 2, 2026). We use
+# `node24` below for forward compatibility — the bundled dist/index.js was tested
+# on Node 22 and runs cleanly on Node 24 (no breaking API changes between the two
+# LTS lines that affect us).
+
+name: PR-BOT
+description: Posts high-signal Slack notifications for PR activity. Reusable-workflow path is preferred; this manifest enables direct `uses:` invocation as a fallback.
+author: PR-BOT maintainers
+
+runs:
+  using: node24
+  main: dist/index.js
