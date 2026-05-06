@@ -20,7 +20,7 @@ The right humans get notified about PR-worthy events; everyone else stays undist
 
 <!-- Current scope. Building toward these. -->
 
-- [ ] When a PR is opened in a watched repo, post a single message to the team Slack channel that @-mentions the author and any reviewers, with a link to the PR
+- [ ] When a PR is opened in a watched repo, post a single message to the team Slack channel formatted `<repo>: @<author> has raised a PR.` (the word `PR` links to the pull request). If reviewers are requested at open time, append ` cc @<reviewer1> @<reviewer2> …`. PR title and branch are intentionally omitted — readers click through
 - [ ] When a reviewer is added to a PR after open, post a thread reply that @-mentions the new reviewer
 - [ ] When a human (non-bot) leaves a comment on a PR, post a thread reply formatted as `@<author> published <N> comments` — without quoting the comment body
 - [ ] When a human submits a review (approve / request changes / comment), post a thread reply summarizing the review state
@@ -53,6 +53,7 @@ The right humans get notified about PR-worthy events; everyone else stays undist
 - **Identity:** GitHub Actions runs with the repo's built-in `GITHUB_TOKEN`; Slack credentials provided as org-level secrets so all 10 repos share them without per-repo setup
 - **State:** No external store. Per-PR Slack `thread_ts` is round-tripped through a hidden HTML comment in the PR body (e.g. `<!-- pr-bot:thread_ts=1700000000.000100 -->`). The bot reads it on subsequent events to thread under the original message
 - **Bot detection:** GitHub webhook payloads include `sender.type` / `actor.type`; filter on `Bot` to skip automated comments
+- **Development location:** Phases 1–3 happen in a free personal GitHub org (`Slaanesh233-sandbox` or similar) with 1 PR-BOT repo + 2 sandbox watched repos, against a free personal Slack workspace dedicated to testing. This sandbox mirrors the company architecture exactly (org-level `SLACK_BOT_TOKEN`, cross-repo `secrets: inherit`, "Accessible from repositories in the org" Actions setting), so behavior verified there is the behavior the company will see. Phase 4 recreates the bot at the company org via fresh push (not transfer), then pilots on one company repo for a week before fanning out to the remaining 9
 
 ## Constraints
 
@@ -74,6 +75,8 @@ The right humans get notified about PR-worthy events; everyone else stays undist
 | Single team Slack channel for v1 | Matches team size; per-repo routing is added complexity for no current need | — Pending |
 | Filter via `actor.type == 'Bot'` rather than a denylist | Self-maintaining; covers dependabot, renovate, codecov, and our own bot without manual upkeep | — Pending |
 | Comment thread replies say `@<author> published N comments` and never quote bodies | The user's explicit signal-over-noise rule; quoting comment text would re-introduce the noise the bot exists to suppress | — Pending |
+| Build in a personal-sandbox GitHub organization first; recreate at the company org only after end-to-end validation | Minimal exposure (no colleague sees a stray Slack message during development) and minimal blast radius (no company repo is touched until P4). A free personal org gives the exact distribution pattern (org-level secrets + cross-repo `secrets: inherit`) the company will use, so nothing about behavior changes when migrating | — Pending |
+| Migrate via fresh push (not `gh repo transfer`) when moving to the company org | Cleanest history at the company — no personal-account commits, fresh `v1.0.0` tag. The sandbox issues and PRs are throwaway anyway | — Pending |
 
 ## Evolution
 
