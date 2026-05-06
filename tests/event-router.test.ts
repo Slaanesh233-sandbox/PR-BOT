@@ -10,10 +10,12 @@ import { describe, expect, it } from 'vitest';
 
 import { classify } from '../src/lib/event-router.js';
 
-function openedPayload(opts: {
-  draft?: boolean;
-  reviewers?: ReadonlyArray<{ login: string }>;
-} = {}): unknown {
+function openedPayload(
+  opts: {
+    draft?: boolean;
+    reviewers?: ReadonlyArray<{ login: string }>;
+  } = {},
+): unknown {
   return {
     action: 'opened',
     pull_request: {
