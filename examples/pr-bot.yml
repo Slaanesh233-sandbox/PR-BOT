@@ -1,0 +1,43 @@
+# examples/pr-bot.yml — canonical caller workflow for PR-BOT.
+#
+# Each watched repo copies this file verbatim to .github/workflows/pr-bot.yml.
+# Do NOT customize per-repo; drift is the enemy (PITFALLS.md §12).
+#
+# Sources:
+#   - REQUIREMENTS.md OPEN-01 (uses cross-repo reusable), OPEN-07 (types: excludes
+#     edited and synchronize), OPEN-08 (subscribes to ready_for_review), FLT-01
+#     (the runtime filter in src/index.ts handles bot senders for any subscribed event)
+#   - REQUIREMENTS.md DIST-02 (canonical caller in examples/)
+#   - .planning/phases/02-first-event-mvp-keystone/02-RESEARCH.md Pattern 4,
+#     Open Question 4 (full Phase 3 event set so Phase 3 doesn't need a re-roll
+#     across the watched repos), Pitfall 3 (@main is acceptable for sandbox; Phase 4
+#     retags to @v1)
+#   - .planning/phases/01-foundations/01-CONTEXT.md D-09 (sandbox repos are
+#     sandbox-repo-a + sandbox-repo-b)
+
+name: PR-BOT
+
+on:
+  pull_request:
+    # CRITICAL: never include `edited` (bot self-loop on our own pull_request body PATCH;
+    # OPEN-07 / Pitfall 9). The runtime filter in src/index.ts (sender.type === 'Bot')
+    # is the second-line defense; this types: list is the structural first line.
+    # CRITICAL: never include `synchronize` (push events; not Slack-worthy).
+    # Phase 2 only handles `opened` + `ready_for_review`; the rest of the list is here so
+    # Phase 3 (event coverage) can ship handlers for them without changing this YAML
+    # in any of the 10 watched repos. Subscribed-but-unhandled events exit clean as
+    # `unhandled-in-p1` (Phase 1 event-router.classify default branch).
+    types: [opened, reopened, ready_for_review, review_requested, closed]
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  notify:
+    # Phase 2 sandbox: pin to main on the sandbox PR-BOT repo (Pitfall 3).
+    # Phase 4 transitions to @v1 mutable major tag at the company-org PR-BOT.
+    uses: Slaanesh233-sandbox/PR-BOT/.github/workflows/notify.yml@main
+    secrets: inherit
