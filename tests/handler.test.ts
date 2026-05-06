@@ -9,7 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { handleEvent, type Deps } from '../src/index.js';
+import { handleEvent, type Deps, type HandleEventCtx } from '../src/index.js';
 
 const SAMPLE_TS = '1700000000.000100'; // FND-06 trailing-zero fixture
 const KAI_SLACK_ID = 'U0B20676JVB';
@@ -77,11 +77,7 @@ interface OpenedEventOpts {
   repoFullName?: string;
 }
 
-function openedEvent(opts: OpenedEventOpts = {}): {
-  name: 'pull_request';
-  payload: unknown;
-  repo: { owner: string; repo: string };
-} {
+function openedEvent(opts: OpenedEventOpts = {}): HandleEventCtx['event'] {
   const draft = opts.draft ?? false;
   const reviewers = opts.reviewers ?? [];
   const authorLogin = opts.authorLogin ?? 'kai';
