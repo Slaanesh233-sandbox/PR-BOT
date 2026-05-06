@@ -1,0 +1,15 @@
+# Sandbox seed (D-12). Real teammate Slack IDs are added at P4 rollout when the bot
+# moves to the company org.
+#
+# IMPORTANT: the values below are PLACEHOLDERS — they pass the regex /^U[A-Z0-9]+$/
+# but they are NOT real Slack user IDs. Plan 01-02 (sandbox bring-up) is currently
+# DEFERRED, so docs/SANDBOX.md "Captured Values" has not been populated. Before any
+# Phase 2 work runs against a real Slack workspace, replace these two values with the
+# actual Slack user IDs captured from the personal sandbox workspace.
+#
+# Schema (validated by tests/config-schema.test.ts):
+#   - top-level `users:` map
+#   - each value matches /^U[A-Z0-9]+$/  (D-05, D-14)
+users:
+  kai: U01ABCD2345
+  dummy-reviewer: U01EFGH6789

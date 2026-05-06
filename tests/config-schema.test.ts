@@ -33,7 +33,10 @@ describe('config/users.yml on-disk schema', () => {
     const yamlText = readFileSync(resolvePath(repoRoot, 'config/users.yml'), 'utf-8');
     const map = loadUsersMap(yamlText);
     for (const [login, id] of Object.entries(map.users)) {
-      expect(USERS_REGEX.test(id), `users.yml: "${login}" -> "${id}" must match ${USERS_REGEX}`).toBe(true);
+      expect(
+        USERS_REGEX.test(id),
+        `users.yml: "${login}" -> "${id}" must match ${USERS_REGEX}`,
+      ).toBe(true);
     }
   });
 

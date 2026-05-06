@@ -1,0 +1,12 @@
+# Sandbox channel ID (D-15).
+#
+# IMPORTANT: this value is a PLACEHOLDER — it passes the regex /^[CG][A-Z0-9]+$/
+# but it is NOT a real Slack channel. Plan 01-02 (sandbox bring-up) is DEFERRED;
+# docs/SANDBOX.md "Captured Values" has not been populated. Before any Phase 2
+# work runs against a real Slack workspace, replace this value with the actual
+# channel ID captured from the personal sandbox workspace.
+#
+# Schema (validated by tests/config-schema.test.ts):
+#   - top-level `channel:` string
+#   - value matches /^[CG][A-Z0-9]+$/  (D-05, D-16; public C* and private G*)
+channel: C01ABCDE234
