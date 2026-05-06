@@ -1,15 +1,16 @@
 # Sandbox seed (D-12). Real teammate Slack IDs are added at P4 rollout when the bot
 # moves to the company org.
 #
-# IMPORTANT: the values below are PLACEHOLDERS — they pass the regex /^U[A-Z0-9]+$/
-# but they are NOT real Slack user IDs. Plan 01-02 (sandbox bring-up) is currently
-# DEFERRED, so docs/SANDBOX.md "Captured Values" has not been populated. Before any
-# Phase 2 work runs against a real Slack workspace, replace these two values with the
-# actual Slack user IDs captured from the personal sandbox workspace.
+# These are real Slack user IDs captured from the personal sandbox workspace
+# (Plan 01-02 Section E). Per Path A: `dummy-reviewer` reuses the same Slack ID as
+# `kai` for now — Phase 1 schema validates regex shape only, and Phase 2 keystone
+# testing can run without a second human. Before Phase 2 reviewer-flow tests
+# (specifically THRD-03), replace `dummy-reviewer` with a real second account's
+# Slack ID and add that GitHub user as a collaborator on the sandbox repos.
 #
 # Schema (validated by tests/config-schema.test.ts):
 #   - top-level `users:` map
 #   - each value matches /^U[A-Z0-9]+$/  (D-05, D-14)
 users:
-  kai: U01ABCD2345
-  dummy-reviewer: U01EFGH6789
+  kai: U0B20676JVB
+  dummy-reviewer: U0B20676JVB
