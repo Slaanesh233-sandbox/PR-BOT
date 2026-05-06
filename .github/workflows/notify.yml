@@ -1,0 +1,77 @@
+# Reusable workflow — invoked by caller workflows in watched repos via:
+#   uses: Slaanesh233-sandbox/PR-BOT/.github/workflows/notify.yml@<ref>
+#   secrets: inherit
+#
+# Sources:
+#   - REQUIREMENTS.md OPEN-01 (callable cross-repo via uses + secrets: inherit)
+#   - REQUIREMENTS.md OPEN-02 (concurrency + permissions)
+#   - REQUIREMENTS.md OPEN-03 (committed dist; never run npm-i at caller-event time)
+#   - REQUIREMENTS.md FLT-01 (sender.type==='Bot' filter — implemented in src/index.ts)
+#   - ROADMAP.md Phase 2 success criteria 1-6
+#   - .planning/phases/02-first-event-mvp-keystone/02-RESEARCH.md Pattern 3,
+#     Pitfalls 1 (reusable runs in caller's context), 2 (cancel-in-progress: false is required),
+#     4 (concurrency group prevents PR-body PATCH races), 5 (OR-fallback for issue_comment
+#     events that lack pull_request.number).
+
+name: PR-BOT notify (reusable)
+
+on:
+  workflow_call:
+    # No inputs in v1. dry-run is OBS-02 (Phase 5 deferred).
+    secrets:
+      # Path-B note (Plan 01-02 SANDBOX.md): SLACK_BOT_TOKEN is repo-level on each
+      # of the 3 sandbox repos under Free tier. `secrets: inherit` from the caller
+      # forwards BOTH org-level AND repo-level secrets to a same-org reusable
+      # workflow (verified 2026-05-06 — see RESEARCH.md Sources). So this works
+      # under Path B with no caller-side changes.
+      SLACK_BOT_TOKEN:
+        required: true
+
+permissions:
+  pull-requests: write   # OPEN-02: required for octokit.rest.pulls.update (PATCH PR body)
+  contents: read         # OPEN-02: read repo metadata
+
+# OPEN-02 + Pitfall 4 (PR-open / first-comment race):
+# Serializes all PR-BOT runs for the same PR so the open-event run finishes its
+# PR-body PATCH before any subsequent event reads the body. cancel-in-progress
+# MUST be false (Pitfall 2) — cancelling the open run mid-flight would leave
+# the PR body without a marker forever, breaking every subsequent event for
+# that PR.
+#
+# Group key uses the OR fallback (Pitfall 5): pull_request events carry
+# payload.pull_request.number; issue_comment events carry only payload.issue.number.
+# The expression must work for both shapes so Phase 3's comment events serialize
+# per-PR (not globally) inside this concurrency bucket.
+concurrency:
+  group: pr-bot-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5   # T-01-19 free-tier defense; well above the ~10-15s expected runtime
+
+    steps:
+      # Pitfall 1: a reusable workflow runs in the CALLER's repo context, so any
+      # relative `uses: ./` would resolve against the caller's checkout (e.g.
+      # sandbox-repo-a/), not PR-BOT's. We need PR-BOT's own dist/ to invoke
+      # `node dist/index.js`, so we explicitly check out PR-BOT into a sub-path.
+      # Phase 2 sandbox: ref `main` (mutable; acceptable for sandbox iteration —
+      # Pitfall 3 documents the @v1 transition for Phase 4).
+      - name: Checkout PR-BOT
+        uses: actions/checkout@v6
+        with:
+          repository: Slaanesh233-sandbox/PR-BOT
+          ref: main   # Phase 4 → @v1 mutable major tag
+          path: .pr-bot
+          fetch-depth: 1
+
+      # No node-installer step is needed: the bundled dist/index.js runs against
+      # the runner's preinstalled Node 22 (PITFALLS.md §21 / OPEN-03 cold-start
+      # budget under ~5s).
+      - name: Run PR-BOT
+        working-directory: .pr-bot
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node dist/index.js
