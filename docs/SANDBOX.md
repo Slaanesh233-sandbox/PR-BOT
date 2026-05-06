@@ -1,5 +1,9 @@
 # PR-BOT Sandbox Bring-Up
 
+> **STATUS: NOT YET ATTESTED — paused per user 2026-05-06.**
+>
+> The checklist below is complete and reviewed, but the actual sandbox bring-up has been **deferred**. The maintainer is still deciding how to host the sandbox repo (which GitHub identity / org to use) and which Slack workspace to attach it to. **Do not execute Sections A–E** until this status banner is removed and the deferral is closed in `.planning/phases/01-foundations/01-02-SUMMARY.md`. Phase 2 cannot start while this banner is present — Phase 2 needs a live sandbox org, a live Slack app, the org-level `SLACK_BOT_TOKEN` secret, the Actions Access toggle flipped, and the Captured Values table below filled in. See the "Pre-Phase-2 unblock checklist" section of `01-02-SUMMARY.md` for the exact resume steps.
+
 ## Why this exists
 
 Phases 1–3 of PR-BOT are validated end-to-end against a personal sandbox (per **DIST-00**) so the company GitHub org and Slack workspace are not touched until Phase 4. The sandbox is built once and reused throughout development. Without it, every test PR is a real PR in a real company channel — both a noise risk (teammates pinged for throwaway test traffic) and a privacy risk (a half-built bot leaking partial messages into a workspace where other humans are working). The sandbox mirrors the production architecture exactly (org-level `SLACK_BOT_TOKEN`, cross-repo `secrets: inherit`, "Accessible from repositories in the org" Actions setting), so behavior verified there is the behavior the company will see.
@@ -25,6 +29,8 @@ Work through the items in order. Each `- [ ]` is a discrete step you can verify 
       git remote add sandbox git@github.com:kai-sandbox/PR-BOT.git
       git push sandbox main
       ```
+
+      > **PAUSED — do not run until remote hosting is confirmed with the user.** The `gh`/`git` CLI on this machine is authenticated against multiple GitHub identities (including a company org), and an accidental push to the wrong remote would create noise in a real company repo. Confirm the target org name and the right SSH/HTTPS identity before running these commands. Until then, leave the `sandbox` remote unconfigured.
 
 - [ ] **A3.** Create two empty sandbox watched repos in the `kai-sandbox` org (D-09): `kai-sandbox/sandbox-repo-a` and `kai-sandbox/sandbox-repo-b`. Each repo is initialized with a `README.md` only. The caller-workflow stub (`.github/workflows/pr-bot.yml`) will be added by Phase 2 — leave the repos empty for now.
 
