@@ -1,0 +1,117 @@
+# Phase 1 CI workflow. Per D-18, runs six gates on every PR and push to main.
+# Per D-21, branch protection on main is deferred to Phase 4 — this workflow runs but is advisory.
+# Action versions are pinned per CLAUDE.md tech stack (actions/checkout@v6, actions/setup-node@v6).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Default GITHUB_TOKEN permissions: read-only. CI only reads code; it does not write to PRs.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: typecheck / test / lint / build / drift / broadcast-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+
+      # Gate 1 (D-18): TypeScript type-check.
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Gate 2 (D-18): Vitest unit tests, including config-schema validation (D-14, D-16, FND-02, FND-03)
+      # and marker round-trip (FND-06).
+      - name: Test
+        run: npm test
+
+      # Gate 3a (D-18): ESLint.
+      - name: Lint
+        run: npm run lint
+
+      # Gate 3b (D-18): Prettier check.
+      - name: Format check
+        run: npm run format:check
+
+      # Gate 4 (D-18, D-19): ncc bundle smoke — `npm run build` produces dist/index.js from
+      # the placeholder src/index.ts (D-19) so the gate is wired even before P2 ships the real action handler.
+      - name: Build (ncc bundle smoke)
+        run: npm run build
+
+      # Gate 5 (D-18): dist drift — committed dist/ must match a fresh build.
+      # Failure mode: someone hand-edited dist/ without a corresponding src/ change.
+      - name: Dist drift check
+        run: |
+          if ! git diff --exit-code dist/; then
+            echo "::error::dist/ is out of sync with src/. Run 'npm run build' locally and commit the result."
+            git diff dist/ | head -50
+            exit 1
+          fi
+
+      # Gate 6 (D-18, D-20, FLT-03): broadcast-mention scan. Pulled forward from P3 per D-20.
+      # Forbids <!here>, <!channel>, <!everyone> (exact match), and @here / @channel / @everyone
+      # ONLY when they appear as standalone tokens (word-boundary anchored \b...\b).
+      # @-prefix tokens require word-boundary anchors; raw <!...> tokens are exact-match.
+      # Without the \b anchors, this would false-positive on benign substrings like
+      # `email@here.example.com` or `pinged @channels` (W-01 fix).
+      - name: Broadcast-mention scan
+        run: |
+          set -e
+          if grep -rEn '<!here>|<!channel>|<!everyone>|\b@(here|channel|everyone)\b' src/; then
+            echo "::error::Broadcast-mention token found in src/. The bot must never @-channel/@-here. See FLT-03 / D-20."
+            exit 1
+          fi
+          echo "OK: no broadcast-mention tokens in src/"
+
+      # Gate 7 (D-03, FLT-05): central-mentions invariant. The <@U…> Slack mention syntax
+      # may only appear in src/lib/mentions.ts; everywhere else in src/ must use mentions.resolve.
+      # Pulled forward as defense-in-depth alongside the broadcast-mention gate.
+      # tests/ is exempt because Vitest fixtures legitimately assert on '<@U…>' literal strings;
+      # mentions.ts is the only producer in src/ (W-02 documentation fix).
+      - name: Central-mentions invariant
+        run: |
+          set -e
+          OFFENDERS=$(grep -rln '<@' src/ | grep -v '^src/lib/mentions.ts$' || true)
+          if [ -n "$OFFENDERS" ]; then
+            echo "::error::Files outside src/lib/mentions.ts construct <@…> Slack mention syntax. See FLT-05 / D-03."
+            echo "$OFFENDERS"
+            exit 1
+          fi
+          echo "OK: <@…> syntax is only in src/lib/mentions.ts"
+
+      # Gate 8 (FLT-06(a)): non-allowlisted-field invariant on src/lib/blocks.ts.
+      # Per the revised OPEN-04 message format, the bot never renders the PR title
+      # or branch refs. blocks.ts must not access pull_request.title, .base.ref,
+      # or .head.ref — and must not declare BuildRootArgs fields named title /
+      # baseRef / headRef. The grep below fails the build if any of these tokens
+      # appear in blocks.ts. Mirrors Gate 7's structure (single-file scope, set -e).
+      # Why blocks.ts only: it is the sole place where Slack message text is
+      # composed. event-router.ts populates the typed PrSummary which itself
+      # excludes these fields (FLT-06(a) at the type layer); this gate is the
+      # second line of defense at the composer.
+      - name: Non-allowlisted-field invariant (blocks.ts)
+        run: |
+          set -e
+          if grep -nE '\.title\b|baseRef|headRef|\.base\.ref|\.head\.ref' src/lib/blocks.ts; then
+            echo "::error::src/lib/blocks.ts references a non-allowlisted PR field (title/baseRef/headRef/base.ref/head.ref). See FLT-06 / OPEN-04. The bot's root message format renders only repo, author mention, PR link, and reviewer mentions."
+            exit 1
+          fi
+          echo "OK: src/lib/blocks.ts contains no title/branch field references"
