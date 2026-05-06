@@ -56,7 +56,10 @@ describe('mentions.resolve', () => {
 
 describe('mentions.resolveAll', () => {
   it('preserves order across mixed mapped + fallback inputs', () => {
-    const result = resolveAll(['unknown-dev', 'kai', 'another-unknown', 'dummy-reviewer'], usersMap);
+    const result = resolveAll(
+      ['unknown-dev', 'kai', 'another-unknown', 'dummy-reviewer'],
+      usersMap,
+    );
     expect(result).toHaveLength(4);
     expect(result[0]).toEqual({ kind: 'fallback', text: '@unknown-dev', login: 'unknown-dev' });
     expect(result[1]).toEqual({ kind: 'mapped', text: '<@U01ABCD2345>', login: 'kai' });

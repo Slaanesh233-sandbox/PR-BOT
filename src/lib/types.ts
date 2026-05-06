@@ -34,17 +34,21 @@ export interface ChannelConfig {
 }
 
 // Mention resolution result. Two shapes (consumed by mentions.ts in Plan 03b):
-//   - mapped:   real <@U…> Slack mention syntax (will trigger a Slack ping)
+//   - mapped:   real Slack-mention syntax (the angle-bracket-at-U… form) that fires a ping
 //   - fallback: plain @login literal (will NOT trigger a ping; user is not in users.yml)
+//
+// FLT-05 invariant note: the literal Slack-mention syntax appears as a string only inside
+// `mentions.ts`. This file describes the type by intent, not by example, so the FLT-05
+// repo-wide grep gate stays clean.
 export type ResolvedMention =
   | {
       readonly kind: 'mapped';
-      readonly text: string /* '<@U01ABCD2345>' */;
+      readonly text: string; // produced by mentions.ts mapped path; renders to a Slack ping
       readonly login: GitHubLogin;
     }
   | {
       readonly kind: 'fallback';
-      readonly text: string /* '@kai' */;
+      readonly text: string; // produced by mentions.ts fallback path; plain @login (no ping)
       readonly login: GitHubLogin;
     };
 
