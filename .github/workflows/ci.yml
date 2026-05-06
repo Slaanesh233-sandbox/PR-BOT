@@ -97,21 +97,22 @@ jobs:
           fi
           echo "OK: <@…> syntax is only in src/lib/mentions.ts"
 
-      # Gate 8 (FLT-06(a)): non-allowlisted-field invariant on src/lib/blocks.ts.
+      # Gate 8 (FLT-06(a)): non-allowlisted-field invariant on src/lib/blocks.ts AND src/index.ts.
       # Per the revised OPEN-04 message format, the bot never renders the PR title
-      # or branch refs. blocks.ts must not access pull_request.title, .base.ref,
-      # or .head.ref — and must not declare BuildRootArgs fields named title /
-      # baseRef / headRef. The grep below fails the build if any of these tokens
-      # appear in blocks.ts. Mirrors Gate 7's structure (single-file scope, set -e).
-      # Why blocks.ts only: it is the sole place where Slack message text is
-      # composed. event-router.ts populates the typed PrSummary which itself
-      # excludes these fields (FLT-06(a) at the type layer); this gate is the
-      # second line of defense at the composer.
-      - name: Non-allowlisted-field invariant (blocks.ts)
+      # or branch refs. Two files now compose Slack-bound text:
+      #   - src/lib/blocks.ts: the Block Kit builder (Phase 1)
+      #   - src/index.ts: the action handler that constructs the plain-text fallback (Phase 2)
+      # Neither file may access pull_request.title, .base.ref, or .head.ref — and neither
+      # may declare argument fields named title / baseRef / headRef. The grep below fails
+      # the build if any of these tokens appear in either file.
+      # Defense-in-depth alongside the type-level allowlist in PrSummary / BuildRootArgs
+      # (event-router.ts narrows webhook payloads to the allowlist; this gate catches any
+      # bypass at the composer layer). Mirrors Gate 7's structure (set -e, scoped grep).
+      - name: Non-allowlisted-field invariant (blocks.ts + index.ts)
         run: |
           set -e
-          if grep -nE '\.title\b|baseRef|headRef|\.base\.ref|\.head\.ref' src/lib/blocks.ts; then
-            echo "::error::src/lib/blocks.ts references a non-allowlisted PR field (title/baseRef/headRef/base.ref/head.ref). See FLT-06 / OPEN-04. The bot's root message format renders only repo, author mention, PR link, and reviewer mentions."
+          if grep -nE '\.title\b|baseRef|headRef|\.base\.ref|\.head\.ref' src/lib/blocks.ts src/index.ts; then
+            echo "::error::A Slack-composer file (src/lib/blocks.ts or src/index.ts) references a non-allowlisted PR field (title/baseRef/headRef/base.ref/head.ref). See FLT-06 / OPEN-04. The bot's root message format renders only repo, author mention, PR link, and reviewer mentions."
             exit 1
           fi
-          echo "OK: src/lib/blocks.ts contains no title/branch field references"
+          echo "OK: src/lib/blocks.ts and src/index.ts contain no title/branch field references"
