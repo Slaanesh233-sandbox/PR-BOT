@@ -60232,6 +60232,9 @@ var dist = __nccwpck_require__(5105);
 //   under float and the thread can no longer be re-located.
 // FND-06: parse(serialize(ts)) === ts (string equality) for ts strings with
 //   significant trailing zeros. Asserted by tests/marker.test.ts.
+// FLT-02: SILENT_MARKER + isSilent are exact-match (no regex, no case-fold) —
+//   leniency creates ambiguity (Pitfall 17). Same prefix and trailing
+//   space-dash-dash-gt closer as the thread_ts marker for visual consistency.
 // T-01-12: enforced via the plan's CI grep that asserts no float-coercion
 //   call site exists in this file.
 /**
@@ -60291,6 +60294,20 @@ function strip(body) {
         .replace(MARKER_REGEX, '')
         .replace(/\n{3,}/g, '\n\n')
         .trimEnd();
+}
+/**
+ * FLT-02 silent-opt-out marker. Exact case-sensitive substring; no whitespace
+ * tolerance, no regex (Pitfall 17 — leniency creates ambiguity). Matches D-02's
+ * marker-shape convention (the `<!-- pr-bot:<token> -->` shape) — same prefix
+ * and same trailing closer.
+ */
+const SILENT_MARKER = '<!-- pr-bot:silent -->';
+/**
+ * Returns true if `body` contains the FLT-02 silent-opt-out marker. Exact
+ * substring check, NOT regex — case-sensitive AND whitespace-strict by intent.
+ */
+function isSilent(body) {
+    return body.includes(SILENT_MARKER);
 }
 
 ;// CONCATENATED MODULE: ./src/lib/mentions.ts
@@ -60383,7 +60400,9 @@ function isBotActor(actor) {
 // FLT-05 invariant precondition: this file MUST NOT contain Slack user-mention
 //   syntax (the angle-bracket-at-U… form) in any string literal. The actual
 //   user-mention rendering happens only in `mentions.ts` (Plan 03b). Verbs and
-//   emoji here are channel-safe glyphs.
+//   emoji here are channel-safe glyphs. Phase-3 formatters take ALREADY-RESOLVED
+//   ResolvedMention values and use only their `.text` property — the formatters
+//   never construct mention syntax themselves.
 //
 // D-20 / FLT-03: this file MUST NOT contain broadcast-mention tokens
 //   (the bang-here / bang-channel / bang-everyone forms, or their @-prefixed
@@ -60419,6 +60438,56 @@ const REVIEW_VERDICT = {
     changes_requested: { emoji: ':warning:', verb: 'requested changes' },
     commented: { emoji: ':speech_balloon:', verb: 'commented' },
 };
+// === Phase 3 — bare-name reaction lookups (Pitfall 3) =====================
+// Both lookups carry BARE emoji names (no colons) — that's what slack.reactions.add
+// expects. The colon-wrapped form (e.g. ':white_check_mark:') lives only on
+// REVIEW_VERDICT for inline message text. Mixing them yields 'invalid_name' from
+// the Slack API.
+//
+// STAT-01 explicit: comment-only review produces NO reaction — the 'commented' key
+// is intentionally absent. Consumers that look up by review state must handle the
+// undefined case (formatReviewReply still runs for 'commented' but Plan 03-02's
+// dispatcher checks key existence before calling reactions.add).
+const REVIEW_REACTION = {
+    approved: 'white_check_mark',
+    changes_requested: 'warning',
+    // 'commented' key intentionally absent — STAT-01: consumers check key existence
+    // before calling reactions.add for a comment-only review verdict.
+};
+const TERMINAL_REACTION = {
+    merged: 'tada',
+    closed: 'no_entry_sign',
+};
+// === Phase 3 — per-event reply-text formatters ============================
+// Every formatter takes ALREADY-RESOLVED ResolvedMention objects. Their .text
+// property carries the appropriate string (mapped: the Slack mention syntax that
+// fires a real ping; fallback: a plain @login that does not). The formatters never
+// construct mention syntax themselves — that lives only in mentions.ts (FLT-05).
+/** THRD-01 review-submitted thread reply (verb pulled from REVIEW_VERDICT). */
+function formatReviewReply(args) {
+    const v = REVIEW_VERDICT[args.state];
+    return `${v.emoji} ${v.verb} by ${args.reviewerMention.text}`;
+}
+/** THRD-02 PR-comment / review-comment thread reply with comment-count grammar. */
+function formatCommentReply(args) {
+    return `${args.commenterMention.text} ${commentGrammar(args.n)}`;
+}
+/** THRD-03 review_requested thread reply (mentions the requested reviewer, NOT the requester — Pitfall 5). */
+function formatRequestedReviewReply(args) {
+    return `review requested from ${args.requestedReviewerMention.text} by ${args.requesterMention.text}`;
+}
+/** THRD-06 reopen thread reply. */
+function formatReopenReply(args) {
+    return `${args.reopenerMention.text} reopened`;
+}
+/** THRD-04 merge thread reply. */
+function formatMergeReply(args) {
+    return `:tada: merged by ${args.mergerMention.text}`;
+}
+/** THRD-05 close-without-merge thread reply. */
+function formatCloseReply(args) {
+    return `:no_entry_sign: closed by ${args.closerMention.text}`;
+}
 
 ;// CONCATENATED MODULE: ./src/lib/blocks.ts
 // Blocks module — Block Kit builders for the OPEN-04 root message and thread replies.
@@ -60483,6 +60552,35 @@ function buildThreadReply(args) {
         blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capSectionText(args.text) } }],
     };
 }
+/**
+ * STAT-02 / STAT-03 strikethrough rebuild of the OPEN-04 root message.
+ *
+ * Same typed args as buildRootMessage (FLT-06(a) — title and branch refs
+ * structurally absent). Wraps the entire rendered text in single tildes (~...~)
+ * to render strikethrough across the <link|PR> and the user mentions
+ * (Research §1b — A2 in Assumptions Log; Plan 03-03 captures the screenshot).
+ *
+ * Returns BOTH blocks AND text because chat.update needs both: providing text
+ * without blocks REPLACES the previous blocks with plain text (Pitfall 2). The
+ * handler dispatcher in Plan 03-02 calls
+ *   slack.chat.update({ channel, ts: rootTs, blocks: r.blocks, text: r.text }).
+ *
+ * Both fields run through capSectionText so FLT-04 still applies after the wrap.
+ */
+function buildStrikethroughRoot(args) {
+    const link = `<${args.prHtmlUrl}|PR>`;
+    let raw = `${args.repoShortName}: ${args.authorMention.text} has raised a ${link}.`;
+    if (args.reviewerMentions.length > 0) {
+        const cc = args.reviewerMentions.map((m) => m.text).join(' ');
+        raw += ` cc ${cc}`;
+    }
+    const struck = `~${raw}~`;
+    const capped = capSectionText(struck);
+    return {
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capped } }],
+        text: capped,
+    };
+}
 
 ;// CONCATENATED MODULE: ./src/lib/event-router.ts
 // Event router — pure classify(event) that maps an inbound webhook payload to a
@@ -60496,40 +60594,170 @@ function buildThreadReply(args) {
 //   - { name: 'pull_request', action: 'ready_for_review' }       -> { kind: 'open', pr, reviewers }
 //   - everything else                                            -> { kind: 'skip', reason: 'unhandled-in-p1' }
 // Phase 3 expands the matrix to cover review verdicts, comments, reopen/merge/close.
+// Per-event details are documented inline by intent (Pitfall 12 — the comment-token
+// convention forbids spelling broadcast-mention literals here). The four router
+// pitfalls handled below: payload presence-check guard for issue_comment-on-PR
+// (Pitfall 4); top-level singular reviewer field for review_requested vs the
+// cumulative list (Pitfall 5); team-reviewer skip path (Pitfall 6); merged-bool
+// split between merged_by.login and sender.login on closed (Pitfall 7).
 //
-// FLT-06(a): the narrow `PrPayload` interface deliberately omits `pull_request.title`,
-// `pull_request.base.ref`, and `pull_request.head.ref`. Those fields exist on the wire
-// but are NOT named here, so the typed snapshot below cannot carry them, so blocks.ts
-// cannot render them. The allowlist is exhaustive — adding a new field here is a
-// trust-boundary review.
+// FLT-06(a): the narrow `*Payload` interfaces deliberately omit `pull_request.title`,
+// `pull_request.base.ref`, `pull_request.head.ref`, `review.body`, `comment.body`.
+// Those fields exist on the wire but are NOT named here, so the typed snapshot below
+// cannot carry them, so blocks.ts cannot render them. The allowlist is exhaustive —
+// adding a new field here is a trust-boundary review.
 /**
  * Classify a raw webhook event into a RoutedEvent descriptor. Pure: no I/O.
  *
  * The input is intentionally typed as `unknown` payload — webhook payloads come from
- * `github.context.payload` which is `any` in practice; we narrow internally to a small
- * allowlisted shape (`PrPayload`) that includes only the fields we actually use.
+ * `github.context.payload` which is `any` in practice; we narrow internally to small
+ * allowlisted shapes (`*Payload`) that include only the fields we actually use.
  */
 function classify(event) {
-    if (event.name !== 'pull_request') {
-        return { kind: 'skip', reason: 'unhandled-in-p1' };
+    if (event.name === 'pull_request') {
+        return classifyPullRequest(event.payload);
     }
-    const p = event.payload;
+    if (event.name === 'pull_request_review') {
+        return classifyPullRequestReview(event.payload);
+    }
+    if (event.name === 'issue_comment') {
+        return classifyIssueComment(event.payload);
+    }
+    if (event.name === 'pull_request_review_comment') {
+        return classifyReviewComment(event.payload);
+    }
+    return { kind: 'skip', reason: 'unhandled-in-p1' };
+}
+function classifyPullRequest(p) {
+    // Phase-1/2 'open' / 'draft' / 'ready_for_review' — preserved verbatim.
     const isOpenLike = p.action === 'opened' || p.action === 'ready_for_review';
-    if (!isOpenLike) {
-        return { kind: 'skip', reason: 'unhandled-in-p1' };
+    if (isOpenLike) {
+        if (p.action === 'opened' && p.pull_request?.draft === true) {
+            return { kind: 'skip', reason: 'draft' };
+        }
+        const pr = {
+            number: p.pull_request?.number ?? 0,
+            htmlUrl: p.pull_request?.html_url ?? '',
+            authorLogin: p.pull_request?.user?.login ?? '',
+        };
+        const reviewers = (p.pull_request?.requested_reviewers ?? [])
+            .map((r) => r.login)
+            .filter((l) => typeof l === 'string');
+        return { kind: 'open', pr, reviewers };
     }
-    if (p.action === 'opened' && p.pull_request?.draft === true) {
-        return { kind: 'skip', reason: 'draft' };
+    // Phase 3 branches — common PR snapshot fields used by every Phase-3 kind.
+    const prNumber = p.pull_request?.number ?? 0;
+    const prHtmlUrl = p.pull_request?.html_url ?? '';
+    const prAuthorLogin = p.pull_request?.user?.login ?? '';
+    const prCreatedAt = p.pull_request?.created_at ?? '';
+    if (p.action === 'review_requested') {
+        // Pitfall 5/6 — read TOP-LEVEL requested_reviewer (the per-event singular field).
+        // Skip when requested_team is set instead (team-reviewer not supported in v1).
+        const requestedReviewerLogin = p.requested_reviewer?.login;
+        if (requestedReviewerLogin === undefined) {
+            return { kind: 'skip', reason: 'team-reviewer-not-supported-in-v1' };
+        }
+        const summary = {
+            requestedReviewerLogin,
+            requesterLogin: p.sender?.login ?? '',
+            prNumber,
+            prHtmlUrl,
+            prAuthorLogin,
+            prCreatedAt,
+        };
+        return { kind: 'reviewer-requested', summary };
     }
-    const pr = {
-        number: p.pull_request?.number ?? 0,
-        htmlUrl: p.pull_request?.html_url ?? '',
-        authorLogin: p.pull_request?.user?.login ?? '',
+    if (p.action === 'closed') {
+        // Pitfall 7 — split on merged true vs false; merged_by.login on merge,
+        // sender.login on close-without-merge.
+        const merged = p.pull_request?.merged === true;
+        const reviewerLogins = (p.pull_request?.requested_reviewers ?? [])
+            .map((r) => r.login)
+            .filter((l) => typeof l === 'string');
+        if (merged) {
+            const summary = {
+                actorLogin: p.pull_request?.merged_by?.login ?? '',
+                prNumber,
+                prHtmlUrl,
+                prAuthorLogin,
+                prCreatedAt,
+                reviewerLogins,
+            };
+            return { kind: 'merged', summary };
+        }
+        const summary = {
+            actorLogin: p.sender?.login ?? '',
+            prNumber,
+            prHtmlUrl,
+            prAuthorLogin,
+            prCreatedAt,
+            reviewerLogins,
+        };
+        return { kind: 'closed-without-merge', summary };
+    }
+    if (p.action === 'reopened') {
+        const summary = {
+            reopenerLogin: p.sender?.login ?? '',
+            prNumber,
+            prHtmlUrl,
+            prAuthorLogin,
+            prCreatedAt,
+        };
+        return { kind: 'reopened', summary };
+    }
+    return { kind: 'skip', reason: 'unhandled-in-p1' };
+}
+function classifyPullRequestReview(p) {
+    if (p.action !== 'submitted') {
+        return { kind: 'skip', reason: 'review-action-unhandled' };
+    }
+    const state = p.review?.state;
+    if (state === undefined) {
+        return { kind: 'skip', reason: 'review-state-missing' };
+    }
+    if (state !== 'approved' && state !== 'changes_requested' && state !== 'commented') {
+        return { kind: 'skip', reason: `review-state-unrecognized:${state}` };
+    }
+    const summary = {
+        state,
+        reviewerLogin: p.review?.user?.login ?? '',
+        prNumber: p.pull_request?.number ?? 0,
+        prHtmlUrl: p.pull_request?.html_url ?? '',
+        prAuthorLogin: p.pull_request?.user?.login ?? '',
+        prCreatedAt: p.pull_request?.created_at ?? '',
     };
-    const reviewers = (p.pull_request?.requested_reviewers ?? [])
-        .map((r) => r.login)
-        .filter((l) => typeof l === 'string');
-    return { kind: 'open', pr, reviewers };
+    return { kind: 'review-submitted', summary };
+}
+function classifyIssueComment(p) {
+    if (p.action !== 'created') {
+        return { kind: 'skip', reason: 'issue-comment-action-unhandled' };
+    }
+    // Pitfall 4 — issue.pull_request is the PRESENCE-CHECK guard. Non-null means
+    // this is a PR comment; null means it's a regular issue comment we ignore.
+    if (p.issue?.pull_request == null) {
+        return { kind: 'skip', reason: 'issue-comment-not-on-pr' };
+    }
+    const summary = {
+        commenterLogin: p.comment?.user?.login ?? '',
+        prNumber: p.issue?.number ?? 0,
+        prHtmlUrl: p.issue?.html_url ?? '',
+        prAuthorLogin: p.issue?.user?.login ?? '',
+        prCreatedAt: p.issue?.created_at ?? '',
+    };
+    return { kind: 'pr-comment', summary };
+}
+function classifyReviewComment(p) {
+    if (p.action !== 'created') {
+        return { kind: 'skip', reason: 'review-comment-action-unhandled' };
+    }
+    const summary = {
+        commenterLogin: p.comment?.user?.login ?? '',
+        prNumber: p.pull_request?.number ?? 0,
+        prHtmlUrl: p.pull_request?.html_url ?? '',
+        prAuthorLogin: p.pull_request?.user?.login ?? '',
+        prCreatedAt: p.pull_request?.created_at ?? '',
+    };
+    return { kind: 'review-comment', summary };
 }
 
 // EXTERNAL MODULE: ./node_modules/yaml/dist/index.js
