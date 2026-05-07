@@ -60392,10 +60392,18 @@ function isBotActor(actor) {
 ;// CONCATENATED MODULE: ./src/lib/copy.ts
 // Copy module — pure-string helpers for Slack message text.
 //
-// D-06: comment-count grammar special-cases the singular form. Spec only
-//   handles N >= 1; N <= 0 is an invalid state — we throw RangeError to fail
-//   loudly rather than silently emit empty copy that would surface as an
-//   awkward "@author " in the channel.
+// D-06 SUPERSEDED 2026-05-07: per-event count is ALWAYS rendered as
+//   `published N comment(s) on the pull request` (PR-conversation thread reply via
+//   formatPrCommentReply) or
+//   `published N inline comment(s) on the pull request` (review-comment thread reply
+//   via formatReviewCommentReply),
+//   regardless of N. The original singular special-case from D-06 is gone; `s` suffix
+//   is conditional on N >= 2 only. N <= 0 / non-integer still throws RangeError to
+//   fail loudly rather than silently emit empty copy. Locked-spec source:
+//   .planning/quick/20260507-001-phase-3-copy-refresh/.
+//
+// REVIEW_VERDICT lookup table is gone — verbs and emoji are inlined in formatReviewReply
+// for clarity (each user-visible string is a locked spec; no indirection).
 //
 // FLT-05 invariant precondition: this file MUST NOT contain Slack user-mention
 //   syntax (the angle-bracket-at-U… form) in any string literal. The actual
@@ -60407,41 +60415,10 @@ function isBotActor(actor) {
 // D-20 / FLT-03: this file MUST NOT contain broadcast-mention tokens
 //   (the bang-here / bang-channel / bang-everyone forms, or their @-prefixed
 //   equivalents). Plan 04 ships the CI gate that enforces this on every PR.
-/**
- * Render the verb phrase that follows the actor's @-mention in a Slack thread
- * reply for a comment event.
- *
- *   commentGrammar(1) === 'commented'
- *   commentGrammar(N >= 2) === 'published N comments'
- *
- * Throws RangeError for N <= 0 or non-integer N (NaN included). Per D-06 the
- * spec only defines behavior for positive integers.
- */
-function commentGrammar(n) {
-    if (!Number.isInteger(n) || n < 1) {
-        throw new RangeError(`commentGrammar: n must be a positive integer, got ${n}`);
-    }
-    if (n === 1)
-        return 'commented';
-    return `published ${n} comments`;
-}
-/**
- * Lookup table for review-submission verdict copy: emoji + verb pair indexed
- * by GitHub's review state (`approved` / `changes_requested` / `commented`).
- * Consumed by blocks.ts and event-router.ts in Plan 03b.
- *
- * `as const` makes both keys and values literal types so consumers get exact
- * string types (e.g. `:white_check_mark:`) rather than widened `string`.
- */
-const REVIEW_VERDICT = {
-    approved: { emoji: ':white_check_mark:', verb: 'approved' },
-    changes_requested: { emoji: ':warning:', verb: 'requested changes' },
-    commented: { emoji: ':speech_balloon:', verb: 'commented' },
-};
 // === Phase 3 — bare-name reaction lookups (Pitfall 3) =====================
 // Both lookups carry BARE emoji names (no colons) — that's what slack.reactions.add
-// expects. The colon-wrapped form (e.g. ':white_check_mark:') lives only on
-// REVIEW_VERDICT for inline message text. Mixing them yields 'invalid_name' from
+// expects. The colon-wrapped form (e.g. ':white_check_mark:') lives only inline in
+// the formatters' user-visible message text. Mixing them yields 'invalid_name' from
 // the Slack API.
 //
 // STAT-01 explicit: comment-only review produces NO reaction — the 'commented' key
@@ -60463,43 +60440,102 @@ const TERMINAL_REACTION = {
 // property carries the appropriate string (mapped: the Slack mention syntax that
 // fires a real ping; fallback: a plain @login that does not). The formatters never
 // construct mention syntax themselves — that lives only in mentions.ts (FLT-05).
-/** THRD-01 review-submitted thread reply (verb pulled from REVIEW_VERDICT). */
+//
+// Locked-spec 2026-05-07: every formatter uses the actor-first pattern with the
+// lowercase trailing phrase "the pull request". User-visible strings are exact and
+// must not be paraphrased.
+/** THRD-01 review-submitted thread reply (actor-first, locked spec 2026-05-07). */
 function formatReviewReply(args) {
-    const v = REVIEW_VERDICT[args.state];
-    return `${v.emoji} ${v.verb} by ${args.reviewerMention.text}`;
+    const m = args.reviewerMention.text;
+    switch (args.state) {
+        case 'approved':
+            return `:white_check_mark: ${m} approved the pull request`;
+        case 'changes_requested':
+            return `:warning: ${m} requested changes on the pull request`;
+        case 'commented':
+            return `:speech_balloon: ${m} commented on the pull request`;
+    }
 }
-/** THRD-02 PR-comment / review-comment thread reply with comment-count grammar. */
-function formatCommentReply(args) {
-    return `${args.commenterMention.text} ${commentGrammar(args.n)}`;
+/**
+ * THRD-02 PR-conversation thread reply — always explicit count (supersedes D-06).
+ *
+ *   formatPrCommentReply({ ..., n: 1 }) === '<m> published 1 comment on the pull request'
+ *   formatPrCommentReply({ ..., n: N }) === '<m> published N comments on the pull request' (N >= 2)
+ *
+ * Throws RangeError for n <= 0 or non-integer n (NaN included).
+ */
+function formatPrCommentReply(args) {
+    if (!Number.isInteger(args.n) || args.n < 1) {
+        throw new RangeError(`formatPrCommentReply: n must be a positive integer, got ${args.n}`);
+    }
+    const word = args.n === 1 ? 'comment' : 'comments';
+    return `${args.commenterMention.text} published ${args.n} ${word} on the pull request`;
 }
-/** THRD-03 review_requested thread reply (mentions the requested reviewer, NOT the requester — Pitfall 5). */
+/**
+ * THRD-02 inline review-comment thread reply — always explicit count.
+ *
+ *   formatReviewCommentReply({ ..., n: 1 }) === '<m> published 1 inline comment on the pull request'
+ *   formatReviewCommentReply({ ..., n: N }) === '<m> published N inline comments on the pull request' (N >= 2)
+ *
+ * Two functions instead of one with a discriminator: each user-visible string is
+ * locked, and collapsing into one function would put the 'inline ' | '' prefix as
+ * a hidden conditional in copy.ts — exactly the kind of indirection the locked
+ * spec wants to avoid. Throws RangeError for n <= 0 or non-integer n.
+ */
+function formatReviewCommentReply(args) {
+    if (!Number.isInteger(args.n) || args.n < 1) {
+        throw new RangeError(`formatReviewCommentReply: n must be a positive integer, got ${args.n}`);
+    }
+    const word = args.n === 1 ? 'inline comment' : 'inline comments';
+    return `${args.commenterMention.text} published ${args.n} ${word} on the pull request`;
+}
+/**
+ * THRD-03 review_requested thread reply — locked spec 2026-05-07 drops the
+ * requester-by clause; only the requested reviewer is mentioned. (Pitfall 5: the
+ * top-level `requested_reviewer` field is the per-event mention target — not the
+ * sender / requester.)
+ */
 function formatRequestedReviewReply(args) {
-    return `review requested from ${args.requestedReviewerMention.text} by ${args.requesterMention.text}`;
+    return `${args.requestedReviewerMention.text} was added as a reviewer on the pull request`;
 }
-/** THRD-06 reopen thread reply. */
+/** THRD-06 reopen thread reply (actor-first, locked spec 2026-05-07). */
 function formatReopenReply(args) {
-    return `${args.reopenerMention.text} reopened`;
+    return `${args.reopenerMention.text} reopened the pull request`;
 }
-/** THRD-04 merge thread reply. */
+/** THRD-04 merge thread reply (actor-first, locked spec 2026-05-07). */
 function formatMergeReply(args) {
-    return `:tada: merged by ${args.mergerMention.text}`;
+    return `:tada: ${args.mergerMention.text} merged the pull request`;
 }
-/** THRD-05 close-without-merge thread reply. */
+/** THRD-05 close-without-merge thread reply (actor-first, locked spec 2026-05-07). */
 function formatCloseReply(args) {
-    return `:no_entry_sign: closed by ${args.closerMention.text}`;
+    return `:no_entry_sign: ${args.closerMention.text} closed the pull request`;
 }
 
 ;// CONCATENATED MODULE: ./src/lib/blocks.ts
 // Blocks module — Block Kit builders for the OPEN-04 root message and thread replies.
 //
-// OPEN-04 root format (revised 2026-05-06):
-//   With NO reviewers:    `<repo>: <author-mention> has raised a <link|PR>.`
-//   With reviewers:       `<repo>: <author-mention> has raised a <link|PR>. cc <r1> <r2> …`
+// OPEN-04 root format (locked spec 2026-05-07; supersedes the prior 2026-05-06 phrasing).
+// Every emitted root post — whether the live OPEN-04 root or the STAT-02/STAT-03
+// strikethrough rebuild — follows this template:
 //
-// PR title and branch refs are intentionally NOT part of the message (FLT-06(a)). The code
-// structure prevents leaking them: the input args type omits the title field and both branch
-// fields, so even a future careless caller cannot pipe those values through this builder. The
-// allowlist on the args type below is exhaustive.
+//   With NO reviewers:    `<repoUrl|repoShortName>: <author-mention> has published a
+//                          <prHtmlUrl|pull request>.`
+//   With reviewers:       same, plus ` cc <r1> <r2> …` after the trailing period.
+//
+// Two Slack mrkdwn link forms appear in the output:
+//   - Repo home link: built from `<args.repoUrl|args.repoShortName>` (repo home URL,
+//     not branch / not tree).
+//   - PR link: built from `<args.prHtmlUrl|pull request>` (the literal text "pull
+//     request" is the user-visible click target — not a PR title, not a branch ref).
+//
+// Both are plain mrkdwn links (no `@` after `<`), so FLT-05's user-mention substring
+// gate is unaffected by construction.
+//
+// PR title and branch refs are intentionally NOT part of the message (FLT-06(a)). The
+// code structure prevents leaking them: the input args type omits the title field and
+// both branch fields, so even a future careless caller cannot pipe those values through
+// this builder. The allowlist on the args type below is exhaustive — `repoUrl` is a URL
+// field structurally distinct from title/branch refs.
 //
 // FLT-04 ceiling: every section's text field caps at MAX_SECTION_TEXT_LENGTH = 3000 chars.
 // Overflow truncates to ceiling-1 chars and appends a single-character ellipsis glyph.
@@ -60529,12 +60565,13 @@ function capSectionText(raw) {
  * Result shape: `{ blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] }`.
  *
  * Note that no PR-title or branch-ref input is accepted by this function — see FLT-06(a).
- * The only fields that can reach Slack via this builder are `repoShortName`, `prHtmlUrl`,
- * and the `text` strings on the supplied `ResolvedMention`s.
+ * The only fields that can reach Slack via this builder are `repoShortName`, `repoUrl`,
+ * `prHtmlUrl`, and the `text` strings on the supplied `ResolvedMention`s.
  */
 function buildRootMessage(args) {
-    const link = `<${args.prHtmlUrl}|PR>`;
-    let raw = `${args.repoShortName}: ${args.authorMention.text} has raised a ${link}.`;
+    const repoLink = `<${args.repoUrl}|${args.repoShortName}>`;
+    const prLink = `<${args.prHtmlUrl}|pull request>`;
+    let raw = `${repoLink}: ${args.authorMention.text} has published a ${prLink}.`;
     if (args.reviewerMentions.length > 0) {
         const cc = args.reviewerMentions.map((m) => m.text).join(' ');
         raw += ` cc ${cc}`;
@@ -60557,7 +60594,7 @@ function buildThreadReply(args) {
  *
  * Same typed args as buildRootMessage (FLT-06(a) — title and branch refs
  * structurally absent). Wraps the entire rendered text in single tildes (~...~)
- * to render strikethrough across the <link|PR> and the user mentions
+ * to render strikethrough across both mrkdwn links and the user mentions
  * (Research §1b — A2 in Assumptions Log; Plan 03-03 captures the screenshot).
  *
  * Returns BOTH blocks AND text because chat.update needs both: providing text
@@ -60568,8 +60605,9 @@ function buildThreadReply(args) {
  * Both fields run through capSectionText so FLT-04 still applies after the wrap.
  */
 function buildStrikethroughRoot(args) {
-    const link = `<${args.prHtmlUrl}|PR>`;
-    let raw = `${args.repoShortName}: ${args.authorMention.text} has raised a ${link}.`;
+    const repoLink = `<${args.repoUrl}|${args.repoShortName}>`;
+    const prLink = `<${args.prHtmlUrl}|pull request>`;
+    let raw = `${repoLink}: ${args.authorMention.text} has published a ${prLink}.`;
     if (args.reviewerMentions.length > 0) {
         const cc = args.reviewerMentions.map((m) => m.text).join(' ');
         raw += ` cc ${cc}`;
@@ -60895,6 +60933,28 @@ function loadChannelConfig(yamlText) {
 // through dependency-injected clients so tests/handler.test.ts can drive every
 // branch with vi.fn() mocks.
 //
+// Phase 3 copy refresh (locked spec 2026-05-07; quick task 20260507-001):
+//   - Root post and strikethrough rebuild now render the linked repo home
+//     `<repoUrl|repoShortName>` and the linked literal "pull request" via
+//     `<prHtmlUrl|pull request>`. The plain-text fallback mirrors the new copy.
+//     `repoUrl` is derived per-event from `event.repo` as
+//     `https://github.com/${owner}/${repo}` and passed through to the blocks
+//     builders. (Note: the new repo-URL link is a plain `<url|text>` mrkdwn
+//     link — NOT a user mention — so FLT-05's substring grep is unaffected by
+//     construction.)
+//   - D-06 SUPERSEDED 2026-05-07: the per-event count is ALWAYS rendered as
+//     `published N comment(s) on the pull request` (PR-conversation thread reply
+//     via formatPrCommentReply) or `published N inline comment(s) on the pull
+//     request` (review-comment thread reply via formatReviewCommentReply).
+//     The pr-comment vs review-comment dispatch paths are split here so each
+//     calls its dedicated formatter.
+//   - formatRequestedReviewReply now takes only `requestedReviewerMention` (the
+//     locked spec drops the "by <requester>" clause). The requester login is no
+//     longer rendered, so the requester unmapped-warn is no longer emitted from
+//     this dispatcher (per Pitfall 5: the requested reviewer is the per-event
+//     mention target — the requester is the sender, not user-visible in the
+//     refreshed copy).
+//
 // Invariants this file MUST satisfy (also enforced by CI gates):
 //   - FLT-05 (Gate 7): the literal Slack user-mention substring does not appear here.
 //     All Slack mention syntax originates from `mentions.resolve` / `mentions.resolveAll`.
@@ -60991,16 +61051,21 @@ async function handleOpen(deps, ctx, routed) {
     const reviewerMentions = resolveAll(routed.reviewers, deps.config.users, { warn });
     // OPEN-04: build root via blocks.buildRootMessage. Only allowlisted fields enter.
     // Pitfall 10: repo SHORT name from payload.repository.name (fallback to context.repo.repo).
+    // Locked spec 2026-05-07: repoUrl is the repo home URL — used to render the leading
+    // repo name as a Slack mrkdwn link (`<repoUrl|repoShortName>`).
     const repoShortName = event.payload.repository?.name ?? repo;
+    const repoUrl = `https://github.com/${owner}/${repo}`;
     const root = buildRootMessage({
         repoShortName,
+        repoUrl,
         prHtmlUrl: routed.pr.htmlUrl,
         authorMention,
         reviewerMentions,
     });
     // Pitfall 8: plain-text fallback for accessibility / DnD push notifications.
     // Built from already-resolved ResolvedMention.text strings — no new mention syntax here.
-    let fallbackText = `${repoShortName}: ${authorMention.text} has raised a PR.`;
+    // Mirrors the locked-spec mrkdwn root copy ("has published a" + "pull request" lowercase).
+    let fallbackText = `${repoShortName}: ${authorMention.text} has published a pull request.`;
     if (reviewerMentions.length > 0) {
         fallbackText += ` cc ${reviewerMentions.map((m) => m.text).join(' ')}`;
     }
@@ -61094,28 +61159,46 @@ async function handleThreadKind(deps, ctx, routed) {
             deps.logger.info(`posted review-submitted reply for PR #${prNumber} (state=${s.state})`);
             return;
         }
-        case 'pr-comment':
-        case 'review-comment': {
+        case 'pr-comment': {
+            // PR-conversation comment thread reply — locked spec 2026-05-07 always uses
+            // the explicit count via formatPrCommentReply (supersedes D-06's singular
+            // special-case). n=1 per event — the bot has no aggregation (ROADMAP success
+            // criterion 2; V2-AGG-01 owns debounce). Two consecutive comments produce
+            // two events, each n=1 → "published 1 comment on the pull request" twice.
             const s = routed.summary;
             const commenterMention = resolve(s.commenterLogin, deps.config.users, { warn });
-            // n=1 per event — the bot has no aggregation (ROADMAP success criterion 2;
-            // V2-AGG-01 owns debounce). Two consecutive comments produce two events,
-            // each n=1.
-            const replyText = formatCommentReply({ commenterMention, n: 1 });
+            const replyText = formatPrCommentReply({ commenterMention, n: 1 });
             const reply = buildThreadReply({ text: replyText });
             const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
             if (!postOk)
                 return;
-            deps.logger.info(`posted ${routed.kind} reply for PR #${prNumber}`);
+            deps.logger.info(`posted pr-comment reply for PR #${prNumber}`);
+            return;
+        }
+        case 'review-comment': {
+            // Inline review-comment thread reply — distinct user-visible string from
+            // pr-comment ("inline comment" vs "comment"); see formatReviewCommentReply.
+            // Always-explicit-count grammar (locked spec 2026-05-07).
+            const s = routed.summary;
+            const commenterMention = resolve(s.commenterLogin, deps.config.users, { warn });
+            const replyText = formatReviewCommentReply({ commenterMention, n: 1 });
+            const reply = buildThreadReply({ text: replyText });
+            const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+            if (!postOk)
+                return;
+            deps.logger.info(`posted review-comment reply for PR #${prNumber}`);
             return;
         }
         case 'reviewer-requested': {
+            // Locked spec 2026-05-07: reply mentions only the requested reviewer
+            // (Pitfall 5 — the per-event mention target — never the sender / requester).
+            // The "by <requester>" clause is gone, so the requester login is not resolved
+            // here and the requester unmapped-warn no longer fires from this dispatcher.
             const s = routed.summary;
             const requestedReviewerMention = resolve(s.requestedReviewerLogin, deps.config.users, {
                 warn,
             });
-            const requesterMention = resolve(s.requesterLogin, deps.config.users, { warn });
-            const replyText = formatRequestedReviewReply({ requestedReviewerMention, requesterMention });
+            const replyText = formatRequestedReviewReply({ requestedReviewerMention });
             const reply = buildThreadReply({ text: replyText });
             const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
             if (!postOk)
@@ -61264,10 +61347,14 @@ async function handleTerminal(deps, ctx, routed, threadTs) {
     const reactionName = TERMINAL_REACTION[routed.kind === 'merged' ? 'merged' : 'closed'];
     // Compose strikethrough rebuild — Plan 03-01 buildStrikethroughRoot uses the
     // same BuildRootArgs that built the original OPEN-04 root (author + reviewers,
-    // NOT the actor login).
+    // NOT the actor login). Locked spec 2026-05-07: repoUrl is now part of the args
+    // so the repo name renders as a `<repoUrl|repoShortName>` mrkdwn link inside
+    // the strikethrough tildes, matching the live root.
     const repoShortName = ctx.event.payload.repository?.name ?? ctx.event.repo.repo;
+    const repoUrl = `https://github.com/${ctx.event.repo.owner}/${ctx.event.repo.repo}`;
     const struck = buildStrikethroughRoot({
         repoShortName,
+        repoUrl,
         prHtmlUrl: summary.prHtmlUrl,
         authorMention,
         reviewerMentions,
