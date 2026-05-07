@@ -14,7 +14,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { MAX_SECTION_TEXT_LENGTH, buildRootMessage, buildThreadReply } from '../src/lib/blocks.js';
+import {
+  MAX_SECTION_TEXT_LENGTH,
+  buildRootMessage,
+  buildStrikethroughRoot,
+  buildThreadReply,
+} from '../src/lib/blocks.js';
 import type { ResolvedMention } from '../src/lib/types.js';
 
 // Helper: extract the rendered section text from a Block Kit result. The shape is
@@ -136,5 +141,85 @@ describe('blocks.buildThreadReply', () => {
     const text = getSectionText(result);
     expect(text.length).toBe(MAX_SECTION_TEXT_LENGTH);
     expect(text.endsWith('…')).toBe(true);
+  });
+});
+
+describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', () => {
+  const author = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'a' });
+  const reviewer = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'r' });
+
+  it('no reviewers → wraps the full OPEN-04-shaped line in single tildes; returns blocks AND text', () => {
+    const r = buildStrikethroughRoot({
+      repoShortName: 'sandbox-repo-a',
+      prHtmlUrl: 'https://github.com/o/r/pull/4',
+      authorMention: author('<@UAUTH>'),
+      reviewerMentions: [],
+    });
+    expect(r.text).toBe(
+      '~sandbox-repo-a: <@UAUTH> has raised a <https://github.com/o/r/pull/4|PR>.~',
+    );
+    expect(r.blocks).toHaveLength(1);
+    const block = r.blocks[0] as { type: string; text: { type: string; text: string } };
+    expect(block.type).toBe('section');
+    expect(block.text.type).toBe('mrkdwn');
+    expect(block.text.text).toBe(r.text); // dual-return parity (Pitfall 2)
+  });
+
+  it('with reviewers → strikethrough wraps cc clause too', () => {
+    const r = buildStrikethroughRoot({
+      repoShortName: 'sandbox-repo-a',
+      prHtmlUrl: 'https://github.com/o/r/pull/4',
+      authorMention: author('<@UAUTH>'),
+      reviewerMentions: [reviewer('<@UR1>'), reviewer('<@UR2>')],
+    });
+    expect(r.text).toBe(
+      '~sandbox-repo-a: <@UAUTH> has raised a <https://github.com/o/r/pull/4|PR>. cc <@UR1> <@UR2>~',
+    );
+  });
+
+  it('FLT-04: 100-reviewer cc list stays under MAX_SECTION_TEXT_LENGTH (no truncation triggered)', () => {
+    const reviewers = Array.from({ length: 100 }, (_, i) =>
+      reviewer(`<@U${String(i).padStart(8, '0')}>`),
+    );
+    const r = buildStrikethroughRoot({
+      repoShortName: 'sandbox-repo-a',
+      prHtmlUrl: 'https://github.com/o/r/pull/4',
+      authorMention: author('<@UAUTH>'),
+      reviewerMentions: reviewers,
+    });
+    expect(r.text.length).toBeLessThan(MAX_SECTION_TEXT_LENGTH);
+    expect(r.text[0]).toBe('~');
+    expect(r.text[r.text.length - 1]).toBe('~');
+  });
+
+  it('FLT-04: synthetic 4000-char repoShortName triggers capSectionText (Research §5)', () => {
+    const longRepo = 'x'.repeat(4000);
+    const r = buildStrikethroughRoot({
+      repoShortName: longRepo,
+      prHtmlUrl: 'https://github.com/o/r/pull/4',
+      authorMention: author('<@UAUTH>'),
+      reviewerMentions: [],
+    });
+    expect(r.text.length).toBe(MAX_SECTION_TEXT_LENGTH);
+    expect(r.text[r.text.length - 1]).toBe('…');
+  });
+});
+
+describe('buildRootMessage — FLT-04 100-reviewer happy path stays under cap (ROADMAP success criterion 5)', () => {
+  const author = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'a' });
+  const reviewer = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'r' });
+
+  it('100 reviewers + author + repo + link → rendered text < 3000 chars', () => {
+    const reviewers = Array.from({ length: 100 }, (_, i) =>
+      reviewer(`<@U${String(i).padStart(8, '0')}>`),
+    );
+    const r = buildRootMessage({
+      repoShortName: 'sandbox-repo-a',
+      prHtmlUrl: 'https://github.com/o/r/pull/4',
+      authorMention: author('<@UAUTH>'),
+      reviewerMentions: reviewers,
+    });
+    const block = r.blocks[0] as { text: { text: string } };
+    expect(block.text.text.length).toBeLessThan(MAX_SECTION_TEXT_LENGTH);
   });
 });

@@ -8,7 +8,15 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { MARKER_REGEX, inject, parse, serialize, strip } from '../src/lib/marker.js';
+import {
+  MARKER_REGEX,
+  SILENT_MARKER,
+  inject,
+  isSilent,
+  parse,
+  serialize,
+  strip,
+} from '../src/lib/marker.js';
 
 describe('marker.parse', () => {
   it('returns the ts when the marker is the only content of the body', () => {
@@ -127,5 +135,30 @@ describe('marker.MARKER_REGEX', () => {
   it('matches the literal marker shape', () => {
     expect(MARKER_REGEX.test('<!-- pr-bot:thread_ts=1700000000.000100 -->')).toBe(true);
     expect(MARKER_REGEX.test('not a marker')).toBe(false);
+  });
+});
+
+describe('SILENT_MARKER + isSilent (FLT-02; Pitfall 17 — exact match, no leniency)', () => {
+  it("SILENT_MARKER literal === '<!-- pr-bot:silent -->'", () => {
+    expect(SILENT_MARKER).toBe('<!-- pr-bot:silent -->');
+  });
+  it('isSilent returns true when SILENT_MARKER substring is present', () => {
+    expect(isSilent('some PR description\n\n<!-- pr-bot:silent -->\n\nrest of body')).toBe(true);
+  });
+  it('isSilent returns false when SILENT_MARKER is absent', () => {
+    expect(isSilent('some PR description with no marker')).toBe(false);
+    expect(isSilent('')).toBe(false);
+  });
+  it('case sensitivity (Pitfall 17): uppercase variants do NOT match', () => {
+    expect(isSilent('<!-- PR-BOT:silent -->')).toBe(false);
+    expect(isSilent('<!-- pr-bot:Silent -->')).toBe(false);
+  });
+  it('whitespace strictness (Pitfall 17): variant whitespace does NOT match', () => {
+    expect(isSilent('<!--pr-bot:silent-->')).toBe(false);
+    expect(isSilent('<!-- pr-bot: silent -->')).toBe(false);
+    expect(isSilent('<!--  pr-bot:silent  -->')).toBe(false);
+  });
+  it('does NOT collide with the thread_ts marker', () => {
+    expect(isSilent('<!-- pr-bot:thread_ts=1700000000.000100 -->')).toBe(false);
   });
 });
