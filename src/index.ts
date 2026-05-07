@@ -72,16 +72,6 @@ import {
   type UsersMap,
 } from './lib/index.js';
 
-// Some Plan-03-01 exports are imported but consumed only by Task 2.3
-// (handleTerminal multi-call dispatcher). Reference them here so the
-// `@typescript-eslint/no-unused-vars` rule does not error during the
-// Task 2.2 GREEN intermediate state. Task 2.3 replaces this `void` block
-// with real call sites inside handleTerminal.
-void buildStrikethroughRoot;
-void formatMergeReply;
-void formatCloseReply;
-void TERMINAL_REACTION;
-
 // --- Public DI seam --------------------------------------------------------
 
 export interface Deps {
@@ -576,19 +566,95 @@ function handleReactionError(deps: Deps, code: string, prNumber: number, name: s
 }
 
 /**
- * Stub for Task 2.3 — multi-call dispatcher for terminal events (merged /
- * closed-without-merge). Task 2.3 wires the actual three-call sequence
- * (postMessage → reactions.add → chat.update strikethrough).
+ * THRD-04 + STAT-02 (merge); THRD-05 + STAT-03 (close-without-merge).
+ *
+ * Multi-call serial best-effort dispatcher per Research §8 + Pitfalls 2 / 9 / 10.
+ * Three Slack calls in order:
+ *   1. chat.postMessage thread reply (LOUD-fail — most user-visible signal)
+ *   2. reactions.add on root (soft-fail with STAT-04 already_reacted tolerance)
+ *   3. chat.update strikethrough on root (soft-fail; Pitfall 2 — both text+blocks;
+ *      Pitfall 9 — never thread_ts)
+ *
+ * Idempotency note (Research §8): re-running a terminal event would post a
+ * duplicate thread reply (signal noise) but reactions.add returns
+ * already_reacted (tolerated) and chat.update is structurally idempotent.
+ * Per-terminal-event idempotency is deferred to V2 unless plan 03-03 keystone
+ * surfaces a real duplicate.
  */
 async function handleTerminal(
   deps: Deps,
-  _ctx: HandleEventCtx,
+  ctx: HandleEventCtx,
   routed: { readonly kind: 'merged' | 'closed-without-merge'; readonly summary: TerminalSummary },
-  _threadTs: string,
+  threadTs: string,
 ): Promise<void> {
-  deps.logger.info(
-    `(stub) handleTerminal not yet implemented for ${routed.kind} on PR #${routed.summary.prNumber} — Task 2.3 wires the multi-call sequence`,
+  const channel = deps.config.channel.channel;
+  const summary = routed.summary;
+  const prNumber = summary.prNumber;
+  const warn = (msg: string): void => deps.logger.warning(msg);
+
+  // Resolve mentions for the reply (actor) and the strikethrough rebuild
+  // (author + reviewers).
+  const actorMention = resolveMention(summary.actorLogin, deps.config.users, { warn });
+  const authorMention = resolveMention(summary.prAuthorLogin, deps.config.users, { warn });
+  const reviewerMentions = resolveAllMentions(
+    summary.reviewerLogins as readonly GitHubLogin[],
+    deps.config.users,
+    { warn },
   );
+
+  // Compose reply text + reaction name per kind.
+  const replyText =
+    routed.kind === 'merged'
+      ? formatMergeReply({ mergerMention: actorMention })
+      : formatCloseReply({ closerMention: actorMention });
+  const reactionName: string = TERMINAL_REACTION[routed.kind === 'merged' ? 'merged' : 'closed'];
+
+  // Compose strikethrough rebuild — Plan 03-01 buildStrikethroughRoot uses the
+  // same BuildRootArgs that built the original OPEN-04 root (author + reviewers,
+  // NOT the actor login).
+  const repoShortName = ctx.event.payload.repository?.name ?? ctx.event.repo.repo;
+  const struck = buildStrikethroughRoot({
+    repoShortName,
+    prHtmlUrl: summary.prHtmlUrl,
+    authorMention,
+    reviewerMentions,
+  });
+
+  // === Call 1: thread reply (LOUD-fail) ===
+  const reply = buildThreadReply({ text: replyText });
+  const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+  if (!postOk) {
+    // setFailed already logged inside postThreadReply.
+    return;
+  }
+
+  // === Call 2: root reaction (soft-fail with STAT-04 tolerance) ===
+  await addReaction(deps, channel, threadTs, reactionName, prNumber);
+
+  // === Call 3: chat.update strikethrough (soft-fail) ===
+  // Pitfall 2: both text AND blocks. Pitfall 9: NO thread_ts.
+  try {
+    const r = await deps.slack.chat.update({
+      channel,
+      ts: threadTs,
+      text: struck.text,
+      blocks: struck.blocks,
+    });
+    if (!r.ok) {
+      deps.logger.warning(
+        `chat.update (${routed.kind} strikethrough) returned !ok for PR #${prNumber}: ${
+          r.error ?? 'unknown'
+        }; thread reply + reaction already landed`,
+      );
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    deps.logger.warning(
+      `chat.update (${routed.kind} strikethrough) threw for PR #${prNumber}: ${message}; thread reply + reaction already landed`,
+    );
+  }
+
+  deps.logger.info(`posted ${routed.kind} thread + reaction + strikethrough for PR #${prNumber}`);
 }
 
 // --- PATCH retry helper (OPEN-05; Pitfall 7) -------------------------------

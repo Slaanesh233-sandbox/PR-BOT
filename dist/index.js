@@ -60882,13 +60882,18 @@ function loadChannelConfig(yamlText) {
 
 
 ;// CONCATENATED MODULE: ./src/index.ts
-// PR-BOT action handler — Phase 2 Plan 02-01.
+// PR-BOT action handler — Phase 2 Plan 02-01 + Phase 3 Plan 03-02.
 //
-// Replaces the Plan 01-01 placeholder. Composes the Phase 1 lib modules into the
-// keystone end-to-end flow: filter bots → classify → idempotency check → resolve
-// mentions → build OPEN-04 root → chat.postMessage → marker.inject → pulls.update
-// (with bounded retry). All Slack and GitHub I/O happens through dependency-injected
-// clients so tests/handler.test.ts can drive every branch with vi.fn() mocks.
+// Phase 2 (Plan 02-01) shipped the keystone open-class flow: filter bots → classify
+// → idempotency check → resolve mentions → build OPEN-04 root → chat.postMessage →
+// marker.inject → pulls.update (with bounded retry).
+//
+// Phase 3 (Plan 03-02) extends the dispatcher with thread-class events: review
+// verdicts, PR comments, inline review comments, reviewer requests, reopens, and
+// terminal merge / close-without-merge (multi-call serial best-effort: thread reply
+// → reactions.add → chat.update strikethrough). All Slack and GitHub I/O happens
+// through dependency-injected clients so tests/handler.test.ts can drive every
+// branch with vi.fn() mocks.
 //
 // Invariants this file MUST satisfy (also enforced by CI gates):
 //   - FLT-05 (Gate 7): the literal Slack user-mention substring does not appear here.
@@ -60902,7 +60907,18 @@ function loadChannelConfig(yamlText) {
 //     the body in the webhook payload (which is stale on re-runs).
 //   - OPEN-05: PATCH retries 1s/3s/9s on transient 5xx; 4xx fails fast.
 //   - Pitfall 8: chat.postMessage receives both `text` (plain fallback) and `blocks`.
+//   - Pitfall 8 (handler-side): pulls.get is called ONCE per event; the live body is
+//     reused for FLT-02 + THRD-07 + thread_ts retrieval.
 //   - Pitfall 10: repo short name comes from `payload.repository.name`, not full_name.
+//   - FLT-02: isSilent(liveBody) is checked BEFORE per-kind dispatch (Research §7).
+//     Both the open-class branch and the thread-class branch honor the silent marker.
+//   - THRD-07: created_at + 60s is the marker-missing anchor (Pitfall 11; never
+//     updated_at — the bot's own marker PATCH shifts updated_at and would silently
+//     widen the race window).
+//   - Pitfall 2 (Plan 03-02): chat.update receives BOTH text and blocks; sending
+//     only one would replace the other.
+//   - Pitfall 9 (Plan 03-02): chat.update never receives thread_ts; that argument
+//     is only valid on chat.postMessage thread replies.
 
 
 
@@ -60913,24 +60929,33 @@ const PATCH_RETRY_DELAYS_MS = [0, 1000, 3000, 9000]; // initial + 3 retries
 async function handleEvent(deps, ctx) {
     const { event } = ctx;
     const sender = event.payload.sender ?? null;
-    // FLT-01: bot-filter runs FIRST, before any I/O.
+    // FLT-01: bot-filter runs FIRST, before any I/O. (PRESERVED — Phase 2)
     if (isBotActor(sender)) {
         deps.logger.info(`skipped: sender is bot (${sender?.login ?? 'unknown'})`);
         return;
     }
-    // Classify via Phase 1 event-router.
+    // Classify via Phase 1/3 event-router. (PRESERVED — extended in Plan 03-01.)
     const routed = classify({ name: event.name, payload: event.payload });
     if (routed.kind === 'skip') {
         deps.logger.info(`skipped: ${routed.reason}`);
         return;
     }
-    if (routed.kind !== 'open') {
-        // Phase 1 only emits 'open' or 'skip' for the open-class; this guard exists for
-        // future-phase RoutedEvent variants (thread-reply etc.) which the open-class
-        // handler does not service.
-        deps.logger.info(`skipped: not an open-class event (kind=${routed.kind})`);
+    if (routed.kind === 'thread-reply') {
+        // Legacy unused Phase-1 variant; the Phase-3 classifier never produces it.
+        // Keep the skip branch for back-compat with the type union shape.
+        deps.logger.info(`skipped: legacy thread-reply variant not produced by classifier`);
         return;
     }
+    if (routed.kind === 'open') {
+        return handleOpen(deps, ctx, routed);
+    }
+    // All other variants are Phase-3 thread-class events. They share the FLT-02 +
+    // THRD-07 prelude (Research §7), then dispatch per-kind.
+    return handleThreadKind(deps, ctx, routed);
+}
+// === Phase 2 open-class flow (extracted from the Plan 02-01 keystone) ======
+async function handleOpen(deps, ctx, routed) {
+    const { event } = ctx;
     const { owner, repo } = event.repo;
     // OPEN-06 / Pitfall 12: idempotency check against LIVE body, not payload body.
     let liveBody = '';
@@ -60944,6 +60969,14 @@ async function handleEvent(deps, ctx) {
     }
     catch (err) {
         deps.logger.setFailed(`pulls.get failed for PR #${routed.pr.number}: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+    }
+    // FLT-02 — silent-marker opt-out. The open-class branch honors it too: a PR
+    // body that already contains the silent marker should not produce a root post,
+    // even on the first opened event. Operators who want to suppress the bot for a
+    // specific PR can pre-write `<!-- pr-bot:silent -->` into the description.
+    if (isSilent(liveBody)) {
+        deps.logger.info(`FLT-02: PR opted out via silent marker — PR #${routed.pr.number}; skipping open event`);
         return;
     }
     if (marker_parse(liveBody) !== null) {
@@ -61002,6 +61035,271 @@ async function handleEvent(deps, ctx) {
     await patchWithRetry(deps, owner, repo, routed.pr.number, newBody);
     deps.logger.info(`posted root for PR #${routed.pr.number}, thread_ts=${threadTs}`);
 }
+// === Phase 3 thread-class flow =============================================
+async function handleThreadKind(deps, ctx, routed) {
+    const { event } = ctx;
+    const { owner, repo } = event.repo;
+    const summary = routed.summary;
+    const prNumber = summary.prNumber;
+    // Step 1: pulls.get → liveBody (single fetch; Pitfall 8 — Phase 2 invariant
+    // preserved).
+    let liveBody = '';
+    try {
+        const prGet = await deps.octokit.rest.pulls.get({ owner, repo, pull_number: prNumber });
+        liveBody = prGet.data.body ?? '';
+    }
+    catch (err) {
+        deps.logger.setFailed(`pulls.get failed for PR #${prNumber}: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+    }
+    // Step 2: FLT-02 — silent-opt-out marker. Forward suppression only (Research §7).
+    if (isSilent(liveBody)) {
+        deps.logger.info(`FLT-02: PR opted out via silent marker — PR #${prNumber}; skipping ${routed.kind} event`);
+        return;
+    }
+    // Step 3: THRD-07 — graceful skip when marker absent.
+    // Anchor is created_at (Pitfall 11), NOT updated_at (which the bot's own
+    // marker PATCH shifts).
+    const threadTs = marker_parse(liveBody);
+    if (threadTs === null) {
+        const createdAtMs = new Date(summary.prCreatedAt).getTime();
+        const ageSec = Number.isFinite(createdAtMs)
+            ? Math.round((Date.now() - createdAtMs) / 1000)
+            : -1;
+        if (Number.isFinite(createdAtMs) && Date.now() - createdAtMs >= 60_000) {
+            deps.logger.warning(`THRD-07: thread-reply event arrived for PR #${prNumber} opened ${ageSec}s ago with no thread_ts marker — skipping. PR may have been created outside the bot's flow, or the bot's PR-opened run failed (check the PR's Actions tab).`);
+        }
+        else {
+            deps.logger.info(`race-window: PR #${prNumber} opened <60s ago, marker not yet present; skipping ${routed.kind} event`);
+        }
+        return;
+    }
+    // Step 4: kind-specific dispatch — see <dispatch_matrix> in plan.
+    const channel = deps.config.channel.channel;
+    const warn = (msg) => deps.logger.warning(msg);
+    switch (routed.kind) {
+        case 'review-submitted': {
+            const s = routed.summary;
+            const reviewerMention = resolve(s.reviewerLogin, deps.config.users, { warn });
+            const replyText = formatReviewReply({ state: s.state, reviewerMention });
+            const reply = buildThreadReply({ text: replyText });
+            const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+            if (!postOk)
+                return;
+            // STAT-01: only approved + changes_requested produce a reaction; commented does NOT.
+            const reaction = REVIEW_REACTION[s.state];
+            if (reaction !== undefined) {
+                await addReaction(deps, channel, threadTs, reaction, prNumber);
+            }
+            deps.logger.info(`posted review-submitted reply for PR #${prNumber} (state=${s.state})`);
+            return;
+        }
+        case 'pr-comment':
+        case 'review-comment': {
+            const s = routed.summary;
+            const commenterMention = resolve(s.commenterLogin, deps.config.users, { warn });
+            // n=1 per event — the bot has no aggregation (ROADMAP success criterion 2;
+            // V2-AGG-01 owns debounce). Two consecutive comments produce two events,
+            // each n=1.
+            const replyText = formatCommentReply({ commenterMention, n: 1 });
+            const reply = buildThreadReply({ text: replyText });
+            const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+            if (!postOk)
+                return;
+            deps.logger.info(`posted ${routed.kind} reply for PR #${prNumber}`);
+            return;
+        }
+        case 'reviewer-requested': {
+            const s = routed.summary;
+            const requestedReviewerMention = resolve(s.requestedReviewerLogin, deps.config.users, {
+                warn,
+            });
+            const requesterMention = resolve(s.requesterLogin, deps.config.users, { warn });
+            const replyText = formatRequestedReviewReply({ requestedReviewerMention, requesterMention });
+            const reply = buildThreadReply({ text: replyText });
+            const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+            if (!postOk)
+                return;
+            deps.logger.info(`posted reviewer-requested reply for PR #${prNumber}`);
+            return;
+        }
+        case 'reopened': {
+            const s = routed.summary;
+            const reopenerMention = resolve(s.reopenerLogin, deps.config.users, { warn });
+            const replyText = formatReopenReply({ reopenerMention });
+            const reply = buildThreadReply({ text: replyText });
+            const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+            if (!postOk)
+                return;
+            deps.logger.info(`posted reopened reply for PR #${prNumber}`);
+            return;
+        }
+        case 'merged':
+        case 'closed-without-merge':
+            // Task 2.3 owns the multi-call dispatcher for these kinds.
+            return handleTerminal(deps, ctx, routed, threadTs);
+        default: {
+            // Exhaustive check — TypeScript's never narrowing catches missing branches.
+            const _exhaustive = routed;
+            void _exhaustive;
+            deps.logger.info(`(unreachable) unhandled routed kind`);
+            return;
+        }
+    }
+}
+// === Phase 3 multi-call helpers =============================================
+/**
+ * Post a Slack thread reply. Returns true on success (so callers can chain).
+ *
+ * Failure handling mirrors the Phase-2 chat.postMessage-throw pattern at
+ * handleOpen lines: not_in_channel surfaces with actionable text; everything
+ * else surfaces with the SDK message. Both paths go through core.setFailed
+ * because the thread reply is the user-visible signal — losing it loses the
+ * record of the event in Slack.
+ */
+async function postThreadReply(deps, channel, threadTs, blocks, text, prNumber) {
+    let result;
+    try {
+        result = await deps.slack.chat.postMessage({ channel, thread_ts: threadTs, blocks, text });
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/not_in_channel/.test(message)) {
+            deps.logger.setFailed(`Slack chat.postMessage (thread reply) failed for PR #${prNumber}: PR-BOT is not a member of channel ${channel}. Run /invite @PR-BOT in the target channel.`);
+        }
+        else {
+            deps.logger.setFailed(`Slack chat.postMessage (thread reply) threw for PR #${prNumber}: ${message}`);
+        }
+        return false;
+    }
+    if (!result.ok) {
+        deps.logger.setFailed(`Slack chat.postMessage (thread reply) returned !ok for PR #${prNumber}: ${result.error ?? 'unknown'}`);
+        return false;
+    }
+    return true;
+}
+/**
+ * STAT-01 / STAT-02 / STAT-03 — add a reaction to a Slack message.
+ *
+ * Error disposition follows Research §4 (reactions.add error table) +
+ * Pitfall 16 (already_reacted vs invalid_name distinction):
+ *   - already_reacted: STAT-04 idempotent re-run guard → core.info, return clean.
+ *   - invalid_name / bad_timestamp / no_item_specified: bot bug → core.setFailed.
+ *   - missing_scope / not_in_channel: hard config error → core.setFailed with
+ *     actionable hint.
+ *   - all other errors (is_archived, message_not_found, ratelimited,
+ *     thread_locked, too_many_emoji, too_many_reactions, edit_window_closed,
+ *     etc.): soft-fail → core.warning (the canonical signal — the thread
+ *     reply — already landed).
+ *
+ * `name` MUST be the BARE emoji name (no colons) — the colon-wrapped form is
+ * for inline message text only. Pitfall 3.
+ */
+async function addReaction(deps, channel, ts, name, prNumber) {
+    try {
+        const r = await deps.slack.reactions.add({ channel, timestamp: ts, name });
+        if (!r.ok) {
+            // Defensively handle the !ok-without-throw shape (the SDK normally throws on !ok).
+            const code = r.error ?? 'unknown';
+            handleReactionError(deps, code, prNumber, name);
+        }
+    }
+    catch (err) {
+        const code = err?.data?.error ??
+            (err instanceof Error ? err.message : 'unknown');
+        handleReactionError(deps, code, prNumber, name);
+    }
+}
+function handleReactionError(deps, code, prNumber, name) {
+    if (code === 'already_reacted') {
+        deps.logger.info(`reactions.add: already_reacted (PR #${prNumber}, ${name}) — idempotent re-run`);
+        return;
+    }
+    if (code === 'invalid_name' || code === 'bad_timestamp' || code === 'no_item_specified') {
+        deps.logger.setFailed(`reactions.add hard-failed (${code}) for PR #${prNumber}, ${name} — bot bug`);
+        return;
+    }
+    if (code === 'not_in_channel') {
+        deps.logger.setFailed(`reactions.add failed (not_in_channel) for PR #${prNumber}, ${name}: PR-BOT is not a member of channel ${deps.config.channel.channel}. Run /invite @PR-BOT in the target channel.`);
+        return;
+    }
+    if (code === 'missing_scope') {
+        deps.logger.setFailed(`reactions.add failed (missing_scope) for PR #${prNumber}, ${name}: PR-BOT app needs reactions:write scope.`);
+        return;
+    }
+    // All other codes (ratelimited / is_archived / message_not_found / thread_locked /
+    // too_many_emoji / too_many_reactions / channel_not_found / token_expired / etc.)
+    deps.logger.warning(`reactions.add soft-failed (${code}) for PR #${prNumber}, ${name}; thread reply still landed`);
+}
+/**
+ * THRD-04 + STAT-02 (merge); THRD-05 + STAT-03 (close-without-merge).
+ *
+ * Multi-call serial best-effort dispatcher per Research §8 + Pitfalls 2 / 9 / 10.
+ * Three Slack calls in order:
+ *   1. chat.postMessage thread reply (LOUD-fail — most user-visible signal)
+ *   2. reactions.add on root (soft-fail with STAT-04 already_reacted tolerance)
+ *   3. chat.update strikethrough on root (soft-fail; Pitfall 2 — both text+blocks;
+ *      Pitfall 9 — never thread_ts)
+ *
+ * Idempotency note (Research §8): re-running a terminal event would post a
+ * duplicate thread reply (signal noise) but reactions.add returns
+ * already_reacted (tolerated) and chat.update is structurally idempotent.
+ * Per-terminal-event idempotency is deferred to V2 unless plan 03-03 keystone
+ * surfaces a real duplicate.
+ */
+async function handleTerminal(deps, ctx, routed, threadTs) {
+    const channel = deps.config.channel.channel;
+    const summary = routed.summary;
+    const prNumber = summary.prNumber;
+    const warn = (msg) => deps.logger.warning(msg);
+    // Resolve mentions for the reply (actor) and the strikethrough rebuild
+    // (author + reviewers).
+    const actorMention = resolve(summary.actorLogin, deps.config.users, { warn });
+    const authorMention = resolve(summary.prAuthorLogin, deps.config.users, { warn });
+    const reviewerMentions = resolveAll(summary.reviewerLogins, deps.config.users, { warn });
+    // Compose reply text + reaction name per kind.
+    const replyText = routed.kind === 'merged'
+        ? formatMergeReply({ mergerMention: actorMention })
+        : formatCloseReply({ closerMention: actorMention });
+    const reactionName = TERMINAL_REACTION[routed.kind === 'merged' ? 'merged' : 'closed'];
+    // Compose strikethrough rebuild — Plan 03-01 buildStrikethroughRoot uses the
+    // same BuildRootArgs that built the original OPEN-04 root (author + reviewers,
+    // NOT the actor login).
+    const repoShortName = ctx.event.payload.repository?.name ?? ctx.event.repo.repo;
+    const struck = buildStrikethroughRoot({
+        repoShortName,
+        prHtmlUrl: summary.prHtmlUrl,
+        authorMention,
+        reviewerMentions,
+    });
+    // === Call 1: thread reply (LOUD-fail) ===
+    const reply = buildThreadReply({ text: replyText });
+    const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+    if (!postOk) {
+        // setFailed already logged inside postThreadReply.
+        return;
+    }
+    // === Call 2: root reaction (soft-fail with STAT-04 tolerance) ===
+    await addReaction(deps, channel, threadTs, reactionName, prNumber);
+    // === Call 3: chat.update strikethrough (soft-fail) ===
+    // Pitfall 2: both text AND blocks. Pitfall 9: NO thread_ts.
+    try {
+        const r = await deps.slack.chat.update({
+            channel,
+            ts: threadTs,
+            text: struck.text,
+            blocks: struck.blocks,
+        });
+        if (!r.ok) {
+            deps.logger.warning(`chat.update (${routed.kind} strikethrough) returned !ok for PR #${prNumber}: ${r.error ?? 'unknown'}; thread reply + reaction already landed`);
+        }
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        deps.logger.warning(`chat.update (${routed.kind} strikethrough) threw for PR #${prNumber}: ${message}; thread reply + reaction already landed`);
+    }
+    deps.logger.info(`posted ${routed.kind} thread + reaction + strikethrough for PR #${prNumber}`);
+}
 // --- PATCH retry helper (OPEN-05; Pitfall 7) -------------------------------
 async function patchWithRetry(deps, owner, repo, pull_number, body) {
     const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -61054,6 +61352,10 @@ async function main() {
             slack: {
                 chat: {
                     postMessage: (args) => slack.chat.postMessage(args),
+                    update: (args) => slack.chat.update(args),
+                },
+                reactions: {
+                    add: (args) => slack.reactions.add(args),
                 },
             },
             octokit: {
