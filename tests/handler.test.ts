@@ -389,7 +389,7 @@ describe('handleEvent — OPEN-04 happy path', () => {
     };
     expect(postArgs.channel).toBe(SANDBOX_CHANNEL_ID);
     expect(postArgs.text).toContain('sandbox-repo-a:');
-    expect(postArgs.text).toContain('has raised a');
+    expect(postArgs.text).toContain('has published a');
     expect(postArgs.text).not.toContain(' cc ');
     expect(Array.isArray(postArgs.blocks) || typeof postArgs.blocks === 'object').toBe(true);
 
@@ -536,7 +536,7 @@ describe('handleEvent — Pitfall 8 plain-text fallback', () => {
     expect((postArgs.text ?? '').length).toBeGreaterThan(0);
     expect(postArgs.blocks).toBeDefined();
     expect(postArgs.text).toContain('sandbox-repo-a:');
-    expect(postArgs.text).toContain('has raised a PR');
+    expect(postArgs.text).toContain('has published a pull request');
   });
 });
 
@@ -684,7 +684,7 @@ describe('handleEvent — THRD-01 review submitted', () => {
       blocks: unknown;
     };
     expect(args.thread_ts).toBe(SAMPLE_TS);
-    expect(args.text).toBe(`:white_check_mark: approved by <@${KAI_SLACK_ID}>`);
+    expect(args.text).toBe(`:white_check_mark: <@${KAI_SLACK_ID}> approved the pull request`);
     expect(args.channel).toBe(SANDBOX_CHANNEL_ID);
     expect(args.blocks).toBeDefined();
 
@@ -708,7 +708,7 @@ describe('handleEvent — THRD-01 review submitted', () => {
       event: reviewSubmittedEvent({ state: 'changes_requested', reviewerLogin: 'reviewer' }),
     });
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(`:warning: requested changes by <@${KAI_SLACK_ID}>`);
+    expect(args.text).toBe(`:warning: <@${KAI_SLACK_ID}> requested changes on the pull request`);
     const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as { name: string };
     expect(reactArgs.name).toBe('warning');
   });
@@ -720,7 +720,7 @@ describe('handleEvent — THRD-01 review submitted', () => {
     });
     expect(spies.postMessage).toHaveBeenCalledTimes(1);
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(`:speech_balloon: commented by <@${KAI_SLACK_ID}>`);
+    expect(args.text).toBe(`:speech_balloon: <@${KAI_SLACK_ID}> commented on the pull request`);
     expect(spies.reactionsAdd).not.toHaveBeenCalled(); // STAT-01: no reaction for commented
   });
 
@@ -736,7 +736,7 @@ describe('handleEvent — THRD-01 review submitted', () => {
       expect.stringMatching(/no Slack ID mapping for github login "unknown-reviewer"/),
     );
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(':white_check_mark: approved by @unknown-reviewer');
+    expect(args.text).toBe(':white_check_mark: @unknown-reviewer approved the pull request');
   });
 });
 
@@ -745,33 +745,32 @@ describe('handleEvent — THRD-01 review submitted', () => {
 describe('handleEvent — THRD-02 PR comment', () => {
   const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
 
-  it('single comment → "<@…> commented" (singular grammar; n=1 per event)', async () => {
+  it('single comment → "<@…> published 1 comment on the pull request" (locked spec; n=1 per event)', async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, { event: prCommentEvent({ commenterLogin: 'commenter' }) });
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(`<@${KAI_SLACK_ID}> commented`);
-    expect(args.text).not.toMatch(/published/);
+    expect(args.text).toBe(`<@${KAI_SLACK_ID}> published 1 comment on the pull request`);
     expect(spies.reactionsAdd).not.toHaveBeenCalled();
   });
 
-  it('two consecutive comments → two thread replies, each "<@…> commented" (no aggregation)', async () => {
+  it('two consecutive comments → two thread replies, each "<@…> published 1 comment on the pull request" (no aggregation)', async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, { event: prCommentEvent({ commenterLogin: 'commenter' }) });
     await handleEvent(deps, { event: prCommentEvent({ commenterLogin: 'commenter' }) });
     expect(spies.postMessage).toHaveBeenCalledTimes(2);
     expect((spies.postMessage.mock.calls[0]![0] as { text: string }).text).toBe(
-      `<@${KAI_SLACK_ID}> commented`,
+      `<@${KAI_SLACK_ID}> published 1 comment on the pull request`,
     );
     expect((spies.postMessage.mock.calls[1]![0] as { text: string }).text).toBe(
-      `<@${KAI_SLACK_ID}> commented`,
+      `<@${KAI_SLACK_ID}> published 1 comment on the pull request`,
     );
   });
 
-  it('inline review comment (pull_request_review_comment) → same shape as pr-comment', async () => {
+  it('inline review comment (pull_request_review_comment) → "published 1 inline comment on the pull request"', async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, { event: reviewCommentEvent({ commenterLogin: 'commenter' }) });
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(`<@${KAI_SLACK_ID}> commented`);
+    expect(args.text).toBe(`<@${KAI_SLACK_ID}> published 1 inline comment on the pull request`);
     expect(spies.reactionsAdd).not.toHaveBeenCalled();
   });
 });
@@ -781,15 +780,16 @@ describe('handleEvent — THRD-02 PR comment', () => {
 describe('handleEvent — THRD-03 reviewer requested', () => {
   const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
 
-  it('mentions the requested reviewer FIRST (Pitfall 5 — not the sender)', async () => {
+  it('mentions the requested reviewer (Pitfall 5 — not the sender; requester clause dropped 2026-05-07)', async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, {
       event: reviewerRequestedEvent({ requestedReviewerLogin: 'reviewer', requesterLogin: 'kai' }),
     });
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(`review requested from <@${KAI_SLACK_ID}> by <@${KAI_SLACK_ID}>`);
-    // The LITERAL ORDER matters: from first, by second.
-    expect(args.text.indexOf('from')).toBeLessThan(args.text.indexOf('by'));
+    expect(args.text).toBe(
+      `<@${KAI_SLACK_ID}> was added as a reviewer on the pull request`,
+    );
+    expect(args.text).toContain('was added as a reviewer');
     expect(spies.reactionsAdd).not.toHaveBeenCalled();
   });
 });
@@ -798,11 +798,11 @@ describe('handleEvent — THRD-03 reviewer requested', () => {
 
 describe('handleEvent — THRD-06 reopened', () => {
   const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
-  it('posts "<@reopener> reopened"', async () => {
+  it('posts "<@reopener> reopened the pull request"', async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(`<@${KAI_SLACK_ID}> reopened`);
+    expect(args.text).toBe(`<@${KAI_SLACK_ID}> reopened the pull request`);
     expect(spies.reactionsAdd).not.toHaveBeenCalled();
   });
 });
@@ -890,9 +890,9 @@ describe('handleEvent — THRD-04 + STAT-02 merge (multi-call dispatcher)', () =
     expect(spies.chatUpdate).toHaveBeenCalledTimes(1);
     expect(spies.setFailed).not.toHaveBeenCalled();
 
-    // Reply text — THRD-04 verbatim.
+    // Reply text — THRD-04 verbatim (locked spec 2026-05-07).
     const postArgs = spies.postMessage.mock.calls[0]![0] as { text: string; thread_ts: string };
-    expect(postArgs.text).toBe(`:tada: merged by <@${KAI_SLACK_ID}>`);
+    expect(postArgs.text).toBe(`:tada: <@${KAI_SLACK_ID}> merged the pull request`);
     expect(postArgs.thread_ts).toBe(SAMPLE_TS);
 
     // Reaction — STAT-02 (BARE name).
@@ -911,7 +911,7 @@ describe('handleEvent — THRD-04 + STAT-02 merge (multi-call dispatcher)', () =
     expect(updateArgs.ts).toBe(SAMPLE_TS);
     expect(updateArgs.channel).toBe(SANDBOX_CHANNEL_ID);
     expect(updateArgs.text).toBe(
-      `~sandbox-repo-a: <@${KAI_SLACK_ID}> has raised a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|PR>.~`,
+      `~<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>: <@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>.~`,
     );
     expect(updateArgs.blocks).toBeDefined();
     expect(updateArgs.thread_ts).toBeUndefined(); // Pitfall 9
@@ -927,7 +927,7 @@ describe('handleEvent — THRD-04 + STAT-02 merge (multi-call dispatcher)', () =
     });
     const updateArgs = spies.chatUpdate.mock.calls[0]![0] as { text: string };
     expect(updateArgs.text).toBe(
-      `~sandbox-repo-a: <@${KAI_SLACK_ID}> has raised a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|PR>. cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>~`,
+      `~<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>: <@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>. cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>~`,
     );
   });
 
@@ -1001,11 +1001,15 @@ describe('handleEvent — THRD-05 + STAT-03 close-without-merge', () => {
     expect(spies.chatUpdate).toHaveBeenCalledTimes(1);
 
     const postArgs = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(postArgs.text).toBe(`:no_entry_sign: closed by <@${KAI_SLACK_ID}>`);
+    expect(postArgs.text).toBe(`:no_entry_sign: <@${KAI_SLACK_ID}> closed the pull request`);
     const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as { name: string };
     expect(reactArgs.name).toBe('no_entry_sign');
     const updateArgs = spies.chatUpdate.mock.calls[0]![0] as { text: string };
-    expect(updateArgs.text).toMatch(/^~sandbox-repo-a: .* has raised a .*\|PR>\.~$/);
+    expect(updateArgs.text).toMatch(
+      /^~<https:\/\/github\.com\/[^|]+\|sandbox-repo-a>: .* has published a .*\|pull request>\.~$/,
+    );
+    expect(updateArgs.text.startsWith('~')).toBe(true);
+    expect(updateArgs.text.endsWith('~')).toBe(true);
   });
 });
 
