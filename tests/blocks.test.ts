@@ -136,6 +136,38 @@ describe('blocks.buildRootMessage', () => {
     const text = getSectionText(result);
     expect(text.length).toBeLessThanOrEqual(MAX_SECTION_TEXT_LENGTH);
   });
+
+  it('returns BOTH blocks AND text — text is the un-wrapped mrkdwn-link form (Change B 2026-05-07: chat.update in handleReopen passes dual args)', () => {
+    const result = buildRootMessage({
+      repoShortName: 'my-pkg',
+      repoUrl: REPO_URL,
+      prHtmlUrl: PR_URL,
+      authorMention: authorMapped,
+      reviewerMentions: [],
+    });
+    expect(result.blocks).toBeDefined();
+    expect(result.text).toBeDefined();
+    // text is the un-wrapped form — same as buildStrikethroughRoot's text MINUS the leading and trailing tildes.
+    expect(result.text).toBe(
+      '<https://github.com/x/y|my-pkg>: <@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>.',
+    );
+    expect(result.text.startsWith('~')).toBe(false);
+    expect(result.text.endsWith('~')).toBe(false);
+  });
+
+  it("text mirrors buildStrikethroughRoot's text minus the surrounding tildes (with reviewers cc clause)", () => {
+    const args = {
+      repoShortName: 'my-pkg',
+      repoUrl: REPO_URL,
+      prHtmlUrl: PR_URL,
+      authorMention: authorMapped,
+      reviewerMentions: [reviewerMapped, reviewerFallback],
+    } as const;
+    const live = buildRootMessage(args);
+    const struck = buildStrikethroughRoot(args);
+    // Sanity: struck wraps the same body in tildes; live is the un-wrapped form.
+    expect(struck.text).toBe(`~${live.text}~`);
+  });
 });
 
 describe('blocks.buildThreadReply', () => {

@@ -24,6 +24,8 @@ interface MockOverrides {
   // Phase 3 additions:
   chatUpdateImpl?: () => Promise<{ ok: boolean; error?: string }>;
   reactionsAddImpl?: () => Promise<{ ok: boolean; error?: string }>;
+  // Change B 2026-05-07 (Task 2):
+  reactionsRemoveImpl?: () => Promise<{ ok: boolean; error?: string }>;
 }
 
 function makeMockDeps(overrides: MockOverrides = {}): {
@@ -38,6 +40,8 @@ function makeMockDeps(overrides: MockOverrides = {}): {
     // Phase 3 spies:
     chatUpdate: ReturnType<typeof vi.fn>;
     reactionsAdd: ReturnType<typeof vi.fn>;
+    // Change B 2026-05-07 (Task 2):
+    reactionsRemove: ReturnType<typeof vi.fn>;
   };
 } {
   const postMessageResult = overrides.postMessageResult ?? { ok: true, ts: SAMPLE_TS };
@@ -59,6 +63,7 @@ function makeMockDeps(overrides: MockOverrides = {}): {
   const pullsUpdateImpl = overrides.pullsUpdateImpl ?? (async () => ({ data: {} }));
   const chatUpdateImpl = overrides.chatUpdateImpl ?? (async () => ({ ok: true }));
   const reactionsAddImpl = overrides.reactionsAddImpl ?? (async () => ({ ok: true }));
+  const reactionsRemoveImpl = overrides.reactionsRemoveImpl ?? (async () => ({ ok: true }));
 
   const postMessage = overrides.postMessageImpl
     ? vi.fn().mockImplementation(overrides.postMessageImpl)
@@ -67,6 +72,7 @@ function makeMockDeps(overrides: MockOverrides = {}): {
   const pullsUpdate = vi.fn().mockImplementation(pullsUpdateImpl);
   const chatUpdate = vi.fn().mockImplementation(chatUpdateImpl);
   const reactionsAdd = vi.fn().mockImplementation(reactionsAddImpl);
+  const reactionsRemove = vi.fn().mockImplementation(reactionsRemoveImpl);
   const info = vi.fn();
   const warning = vi.fn();
   const setFailed = vi.fn();
@@ -74,7 +80,7 @@ function makeMockDeps(overrides: MockOverrides = {}): {
   const deps: Deps = {
     slack: {
       chat: { postMessage, update: chatUpdate },
-      reactions: { add: reactionsAdd },
+      reactions: { add: reactionsAdd, remove: reactionsRemove },
     } as unknown as Deps['slack'],
     octokit: {
       rest: { pulls: { get: pullsGet, update: pullsUpdate } },
@@ -98,6 +104,7 @@ function makeMockDeps(overrides: MockOverrides = {}): {
       setFailed,
       chatUpdate,
       reactionsAdd,
+      reactionsRemove,
     },
   };
 }
@@ -286,12 +293,15 @@ interface ReopenOpts {
   prCreatedAt?: string;
   senderType?: string;
   repoName?: string;
+  // Change B 2026-05-07 (Task 2): cumulative reviewers at reopen time, parallel to mergedEvent.
+  reviewers?: string[];
 }
 
 function reopenedEvent(opts: ReopenOpts = {}): HandleEventCtx['event'] {
   const repoName = opts.repoName ?? 'sandbox-repo-a';
   const prNumber = opts.prNumber ?? 42;
   const reopenerLogin = opts.reopenerLogin ?? 'reopener';
+  const reviewers = opts.reviewers ?? [];
   return {
     name: 'pull_request' as const,
     payload: {
@@ -302,6 +312,7 @@ function reopenedEvent(opts: ReopenOpts = {}): HandleEventCtx['event'] {
         html_url: `https://github.com/Slaanesh233-sandbox/${repoName}/pull/${prNumber}`,
         user: { login: 'kai' },
         created_at: opts.prCreatedAt ?? OLD_CREATED_AT,
+        requested_reviewers: reviewers.map((login) => ({ login })),
       },
       repository: { name: repoName, full_name: `Slaanesh233-sandbox/${repoName}` },
     } as unknown as HandleEventCtx['event']['payload'],
@@ -796,15 +807,170 @@ describe('handleEvent — THRD-03 reviewer requested', () => {
 });
 
 // ===== Phase 3 — THRD-06 reopened =========================================
+// Change B 2026-05-07: reopen becomes a multi-call dispatcher — postMessage thread reply
+// + reactions.remove ×2 (no_entry_sign then tada) + chat.update with the un-struck root
+// rebuilt via buildRootMessage (NOT buildStrikethroughRoot).
 
-describe('handleEvent — THRD-06 reopened', () => {
+describe('handleEvent — THRD-06 reopened (Change B 2026-05-07: multi-call un-strike)', () => {
   const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
-  it('posts "<@reopener> reopened the pull request"', async () => {
+
+  it('happy path no-reviewers: thread reply + reactions.remove ×2 + chat.update with UN-STRUCK root', async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
-    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(`<@${KAI_SLACK_ID}> reopened the pull request`);
-    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.reactionsRemove).toHaveBeenCalledTimes(2);
+    expect(spies.chatUpdate).toHaveBeenCalledTimes(1);
+    expect(spies.setFailed).not.toHaveBeenCalled();
+
+    const postArgs = spies.postMessage.mock.calls[0]![0] as { text: string; thread_ts: string };
+    expect(postArgs.text).toBe(`<@${KAI_SLACK_ID}> reopened the pull request`);
+    expect(postArgs.thread_ts).toBe(SAMPLE_TS);
+
+    const remove1 = spies.reactionsRemove.mock.calls[0]![0] as {
+      name: string;
+      timestamp: string;
+      channel: string;
+    };
+    const remove2 = spies.reactionsRemove.mock.calls[1]![0] as { name: string; timestamp: string };
+    expect(remove1.name).toBe('no_entry_sign'); // BARE name (Pitfall 3)
+    expect(remove1.timestamp).toBe(SAMPLE_TS);
+    expect(remove1.channel).toBe(SANDBOX_CHANNEL_ID);
+    expect(remove2.name).toBe('tada');
+    expect(remove2.timestamp).toBe(SAMPLE_TS);
+
+    const updateArgs = spies.chatUpdate.mock.calls[0]![0] as {
+      channel: string;
+      ts: string;
+      text: string;
+      blocks: unknown;
+      thread_ts?: string;
+    };
+    expect(updateArgs.ts).toBe(SAMPLE_TS);
+    expect(updateArgs.channel).toBe(SANDBOX_CHANNEL_ID);
+    // Un-struck root — NO leading/trailing tildes (vs handleTerminal which wraps).
+    expect(updateArgs.text).toBe(
+      `<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>: <@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>.`,
+    );
+    expect(updateArgs.text.startsWith('~')).toBe(false);
+    expect(updateArgs.text.endsWith('~')).toBe(false);
+    expect(updateArgs.blocks).toBeDefined();
+    expect(updateArgs.thread_ts).toBeUndefined(); // Pitfall 9
+  });
+
+  it('with reviewers: chat.update un-struck root carries cc clause', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      users: { kai: KAI_SLACK_ID, reopener: KAI_SLACK_ID, r1: KAI_SLACK_ID, r2: KAI_SLACK_ID },
+    });
+    await handleEvent(deps, {
+      event: reopenedEvent({ reopenerLogin: 'reopener', reviewers: ['r1', 'r2'] }),
+    });
+    const updateArgs = spies.chatUpdate.mock.calls[0]![0] as { text: string };
+    expect(updateArgs.text).toBe(
+      `<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>: <@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>. cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>`,
+    );
+  });
+
+  it('multi-call ordering: postMessage → reactions.remove (no_entry_sign) → reactions.remove (tada) → chat.update', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
+    const order1 = spies.postMessage.mock.invocationCallOrder[0]!;
+    const order2 = spies.reactionsRemove.mock.invocationCallOrder[0]!;
+    const order3 = spies.reactionsRemove.mock.invocationCallOrder[1]!;
+    const order4 = spies.chatUpdate.mock.invocationCallOrder[0]!;
+    expect(order1).toBeLessThan(order2);
+    expect(order2).toBeLessThan(order3);
+    expect(order3).toBeLessThan(order4);
+  });
+
+  it('postMessage throws not_in_channel → setFailed; reactions.remove + chat.update NOT attempted', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      postMessageImpl: async () => {
+        throw new Error('not_in_channel');
+      },
+    });
+    await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
+    expect(spies.setFailed).toHaveBeenCalledWith(expect.stringMatching(/not_in_channel|invite/));
+    expect(spies.reactionsRemove).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).not.toHaveBeenCalled();
+  });
+
+  it('reactions.remove returns no_reaction (idempotent re-run) → core.info; chat.update STILL attempted', async () => {
+    const removeErr = new Error('Slack API error') as Error & { data: { error: string } };
+    removeErr.data = { error: 'no_reaction' };
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsRemoveImpl: async () => {
+        throw removeErr;
+      },
+    });
+    await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/no_reaction/));
+    expect(spies.setFailed).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).toHaveBeenCalledTimes(1); // CRITICAL: continues
+  });
+
+  it('reactions.remove returns message_not_found → core.warning; chat.update STILL attempted', async () => {
+    const removeErr = new Error('Slack API error') as Error & { data: { error: string } };
+    removeErr.data = { error: 'message_not_found' };
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsRemoveImpl: async () => {
+        throw removeErr;
+      },
+    });
+    await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
+    expect(spies.warning).toHaveBeenCalledWith(expect.stringMatching(/message_not_found/));
+    expect(spies.setFailed).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('reactions.remove returns ratelimited → core.warning; chat.update STILL attempted', async () => {
+    const removeErr = new Error('Slack API error') as Error & { data: { error: string } };
+    removeErr.data = { error: 'ratelimited' };
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsRemoveImpl: async () => {
+        throw removeErr;
+      },
+    });
+    await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
+    expect(spies.warning).toHaveBeenCalledWith(expect.stringMatching(/ratelimited/));
+    expect(spies.setFailed).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('reactions.remove returns invalid_name → core.setFailed; chat.update STILL attempted (mirrors handleTerminal contract)', async () => {
+    const removeErr = new Error('Slack API error') as Error & { data: { error: string } };
+    removeErr.data = { error: 'invalid_name' };
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsRemoveImpl: async () => {
+        throw removeErr;
+      },
+    });
+    await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
+    expect(spies.setFailed).toHaveBeenCalledWith(expect.stringMatching(/invalid_name/));
+    expect(spies.chatUpdate).toHaveBeenCalledTimes(1); // dispatcher continues per contract
+  });
+
+  it('chat.update throws edit_window_closed → core.warning; thread reply + reactions.remove already landed', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      chatUpdateImpl: async () => {
+        throw new Error('edit_window_closed');
+      },
+    });
+    await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.reactionsRemove).toHaveBeenCalledTimes(2);
+    expect(spies.warning).toHaveBeenCalledWith(
+      expect.stringMatching(/edit_window_closed|chat\.update/),
+    );
+    expect(spies.setFailed).not.toHaveBeenCalled();
   });
 });
 

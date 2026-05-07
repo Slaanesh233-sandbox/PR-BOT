@@ -328,7 +328,7 @@ describe('classify — pull_request closed merged vs not (THRD-04 / THRD-05; Pit
 });
 
 describe('classify — pull_request reopened (THRD-06)', () => {
-  it('reopened → returns reopened with reopenerLogin from sender.login', () => {
+  it('reopened → returns reopened with reopenerLogin from sender.login (no reviewers default)', () => {
     const payload = {
       action: 'reopened',
       sender: { login: 'reopener-1' },
@@ -344,6 +344,24 @@ describe('classify — pull_request reopened (THRD-06)', () => {
     if (r.kind !== 'reopened') throw new Error('discriminator');
     expect(r.summary.reopenerLogin).toBe('reopener-1');
     expect(r.summary.prAuthorLogin).toBe('kai');
+    expect(r.summary.reviewerLogins).toEqual([]);
+  });
+
+  it('reopened with reviewers → reviewerLogins preserves order (parallel to TerminalSummary)', () => {
+    const payload = {
+      action: 'reopened',
+      sender: { login: 'reopener-1' },
+      pull_request: {
+        number: 7,
+        html_url: 'https://github.com/o/r/pull/7',
+        user: { login: 'kai' },
+        created_at: '2026-01-01T00:00:00Z',
+        requested_reviewers: [{ login: 'r1' }, { login: 'r2' }],
+      },
+    };
+    const r = classify({ name: 'pull_request', payload });
+    if (r.kind !== 'reopened') throw new Error('discriminator');
+    expect(r.summary.reviewerLogins).toEqual(['r1', 'r2']);
   });
 });
 
