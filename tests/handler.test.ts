@@ -713,15 +713,18 @@ describe('handleEvent — THRD-01 review submitted', () => {
     expect(reactArgs.name).toBe('warning');
   });
 
-  it('commented → :speech_balloon: reply with NO reaction (STAT-01 explicit)', async () => {
+  it("commented → ZERO Slack calls + info 'commented-review-redundant-...' (Change A 2026-05-07; redundant with review-comment events)", async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, {
       event: reviewSubmittedEvent({ state: 'commented', reviewerLogin: 'reviewer' }),
     });
-    expect(spies.postMessage).toHaveBeenCalledTimes(1);
-    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(`:speech_balloon: <@${KAI_SLACK_ID}> commented on the pull request`);
-    expect(spies.reactionsAdd).not.toHaveBeenCalled(); // STAT-01: no reaction for commented
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+    expect(spies.pullsGet).not.toHaveBeenCalled(); // router-skip short-circuits before any I/O
+    expect(spies.info).toHaveBeenCalledWith(
+      expect.stringMatching(/commented-review-redundant-with-review-comment-events/),
+    );
+    expect(spies.setFailed).not.toHaveBeenCalled();
   });
 
   it('unmapped reviewer → fallback @-text + warning logged; thread reply still posts', async () => {

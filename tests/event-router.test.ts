@@ -127,7 +127,7 @@ describe('classify — pull_request_review submitted (THRD-01)', () => {
       sender: { login: opts.senderLogin ?? 'reviewer-1' },
     };
   }
-  for (const state of ['approved', 'changes_requested', 'commented'] as const) {
+  for (const state of ['approved', 'changes_requested'] as const) {
     it(`state=${state} → returns review-submitted with the verdict`, () => {
       const r = classify({ name: 'pull_request_review', payload: reviewPayload({ state }) });
       expect(r.kind).toBe('review-submitted');
@@ -139,6 +139,13 @@ describe('classify — pull_request_review submitted (THRD-01)', () => {
       expect(r.summary.prCreatedAt).toBe('2026-01-01T00:00:00Z');
     });
   }
+  it("state=commented → skip with reason 'commented-review-redundant-with-review-comment-events' (Change A 2026-05-07)", () => {
+    const r = classify({ name: 'pull_request_review', payload: reviewPayload({ state: 'commented' }) });
+    expect(r).toEqual({
+      kind: 'skip',
+      reason: 'commented-review-redundant-with-review-comment-events',
+    });
+  });
   it('state missing → skip review-state-missing', () => {
     expect(
       classify({ name: 'pull_request_review', payload: reviewPayload({ state: undefined }) }),

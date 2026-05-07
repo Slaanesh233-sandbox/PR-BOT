@@ -34,7 +34,7 @@ describe('REVIEW_REACTION (Pitfall 3 — bare names for reactions.add)', () => {
   it("changes_requested is the bare name 'warning'", () => {
     expect(REVIEW_REACTION.changes_requested).toBe('warning');
   });
-  it("'commented' key is intentionally absent (STAT-01 — no reaction for comment-only review)", () => {
+  it("'commented' key is absent — Change A 2026-05-07 router-skips state==='commented' upstream so the lookup is two-state-exhaustive", () => {
     expect((REVIEW_REACTION as { commented?: string }).commented).toBeUndefined();
   });
 });
@@ -58,11 +58,6 @@ describe('formatReviewReply (THRD-01 — actor-first, locked spec 2026-05-07)', 
   it("changes_requested → ':warning: <reviewer> requested changes on the pull request'", () => {
     expect(formatReviewReply({ state: 'changes_requested', reviewerMention: m('<@U123>') })).toBe(
       ':warning: <@U123> requested changes on the pull request',
-    );
-  });
-  it("commented → ':speech_balloon: <reviewer> commented on the pull request'", () => {
-    expect(formatReviewReply({ state: 'commented', reviewerMention: m('<@U123>') })).toBe(
-      ':speech_balloon: <@U123> commented on the pull request',
     );
   });
   it('fallback mention text flows through unchanged', () => {
