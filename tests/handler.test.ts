@@ -786,9 +786,7 @@ describe('handleEvent — THRD-03 reviewer requested', () => {
       event: reviewerRequestedEvent({ requestedReviewerLogin: 'reviewer', requesterLogin: 'kai' }),
     });
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(
-      `<@${KAI_SLACK_ID}> was added as a reviewer on the pull request`,
-    );
+    expect(args.text).toBe(`<@${KAI_SLACK_ID}> was added as a reviewer on the pull request`);
     expect(args.text).toContain('was added as a reviewer');
     expect(spies.reactionsAdd).not.toHaveBeenCalled();
   });

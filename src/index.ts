@@ -11,6 +11,28 @@
 // through dependency-injected clients so tests/handler.test.ts can drive every
 // branch with vi.fn() mocks.
 //
+// Phase 3 copy refresh (locked spec 2026-05-07; quick task 20260507-001):
+//   - Root post and strikethrough rebuild now render the linked repo home
+//     `<repoUrl|repoShortName>` and the linked literal "pull request" via
+//     `<prHtmlUrl|pull request>`. The plain-text fallback mirrors the new copy.
+//     `repoUrl` is derived per-event from `event.repo` as
+//     `https://github.com/${owner}/${repo}` and passed through to the blocks
+//     builders. (Note: the new repo-URL link is a plain `<url|text>` mrkdwn
+//     link — NOT a user mention — so FLT-05's substring grep is unaffected by
+//     construction.)
+//   - D-06 SUPERSEDED 2026-05-07: the per-event count is ALWAYS rendered as
+//     `published N comment(s) on the pull request` (PR-conversation thread reply
+//     via formatPrCommentReply) or `published N inline comment(s) on the pull
+//     request` (review-comment thread reply via formatReviewCommentReply).
+//     The pr-comment vs review-comment dispatch paths are split here so each
+//     calls its dedicated formatter.
+//   - formatRequestedReviewReply now takes only `requestedReviewerMention` (the
+//     locked spec drops the "by <requester>" clause). The requester login is no
+//     longer rendered, so the requester unmapped-warn is no longer emitted from
+//     this dispatcher (per Pitfall 5: the requested reviewer is the per-event
+//     mention target — the requester is the sender, not user-visible in the
+//     refreshed copy).
+//
 // Invariants this file MUST satisfy (also enforced by CI gates):
 //   - FLT-05 (Gate 7): the literal Slack user-mention substring does not appear here.
 //     All Slack mention syntax originates from `mentions.resolve` / `mentions.resolveAll`.
@@ -48,10 +70,11 @@ import {
   buildThreadReply,
   classify,
   formatCloseReply,
-  formatCommentReply,
   formatMergeReply,
+  formatPrCommentReply,
   formatRequestedReviewReply,
   formatReopenReply,
+  formatReviewCommentReply,
   formatReviewReply,
   inject as injectMarker,
   isBotActor,
@@ -244,9 +267,13 @@ async function handleOpen(
 
   // OPEN-04: build root via blocks.buildRootMessage. Only allowlisted fields enter.
   // Pitfall 10: repo SHORT name from payload.repository.name (fallback to context.repo.repo).
+  // Locked spec 2026-05-07: repoUrl is the repo home URL — used to render the leading
+  // repo name as a Slack mrkdwn link (`<repoUrl|repoShortName>`).
   const repoShortName = event.payload.repository?.name ?? repo;
+  const repoUrl = `https://github.com/${owner}/${repo}`;
   const root = buildRootMessage({
     repoShortName,
+    repoUrl,
     prHtmlUrl: routed.pr.htmlUrl,
     authorMention,
     reviewerMentions,
@@ -254,7 +281,8 @@ async function handleOpen(
 
   // Pitfall 8: plain-text fallback for accessibility / DnD push notifications.
   // Built from already-resolved ResolvedMention.text strings — no new mention syntax here.
-  let fallbackText = `${repoShortName}: ${authorMention.text} has raised a PR.`;
+  // Mirrors the locked-spec mrkdwn root copy ("has published a" + "pull request" lowercase).
+  let fallbackText = `${repoShortName}: ${authorMention.text} has published a pull request.`;
   if (reviewerMentions.length > 0) {
     fallbackText += ` cc ${reviewerMentions.map((m) => m.text).join(' ')}`;
   }
@@ -376,14 +404,15 @@ async function handleThreadKind(
       deps.logger.info(`posted review-submitted reply for PR #${prNumber} (state=${s.state})`);
       return;
     }
-    case 'pr-comment':
-    case 'review-comment': {
+    case 'pr-comment': {
+      // PR-conversation comment thread reply — locked spec 2026-05-07 always uses
+      // the explicit count via formatPrCommentReply (supersedes D-06's singular
+      // special-case). n=1 per event — the bot has no aggregation (ROADMAP success
+      // criterion 2; V2-AGG-01 owns debounce). Two consecutive comments produce
+      // two events, each n=1 → "published 1 comment on the pull request" twice.
       const s = routed.summary;
       const commenterMention = resolveMention(s.commenterLogin, deps.config.users, { warn });
-      // n=1 per event — the bot has no aggregation (ROADMAP success criterion 2;
-      // V2-AGG-01 owns debounce). Two consecutive comments produce two events,
-      // each n=1.
-      const replyText = formatCommentReply({ commenterMention, n: 1 });
+      const replyText = formatPrCommentReply({ commenterMention, n: 1 });
       const reply = buildThreadReply({ text: replyText });
       const postOk = await postThreadReply(
         deps,
@@ -394,16 +423,39 @@ async function handleThreadKind(
         prNumber,
       );
       if (!postOk) return;
-      deps.logger.info(`posted ${routed.kind} reply for PR #${prNumber}`);
+      deps.logger.info(`posted pr-comment reply for PR #${prNumber}`);
+      return;
+    }
+    case 'review-comment': {
+      // Inline review-comment thread reply — distinct user-visible string from
+      // pr-comment ("inline comment" vs "comment"); see formatReviewCommentReply.
+      // Always-explicit-count grammar (locked spec 2026-05-07).
+      const s = routed.summary;
+      const commenterMention = resolveMention(s.commenterLogin, deps.config.users, { warn });
+      const replyText = formatReviewCommentReply({ commenterMention, n: 1 });
+      const reply = buildThreadReply({ text: replyText });
+      const postOk = await postThreadReply(
+        deps,
+        channel,
+        threadTs,
+        reply.blocks,
+        replyText,
+        prNumber,
+      );
+      if (!postOk) return;
+      deps.logger.info(`posted review-comment reply for PR #${prNumber}`);
       return;
     }
     case 'reviewer-requested': {
+      // Locked spec 2026-05-07: reply mentions only the requested reviewer
+      // (Pitfall 5 — the per-event mention target — never the sender / requester).
+      // The "by <requester>" clause is gone, so the requester login is not resolved
+      // here and the requester unmapped-warn no longer fires from this dispatcher.
       const s = routed.summary;
       const requestedReviewerMention = resolveMention(s.requestedReviewerLogin, deps.config.users, {
         warn,
       });
-      const requesterMention = resolveMention(s.requesterLogin, deps.config.users, { warn });
-      const replyText = formatRequestedReviewReply({ requestedReviewerMention, requesterMention });
+      const replyText = formatRequestedReviewReply({ requestedReviewerMention });
       const reply = buildThreadReply({ text: replyText });
       const postOk = await postThreadReply(
         deps,
@@ -611,10 +663,14 @@ async function handleTerminal(
 
   // Compose strikethrough rebuild — Plan 03-01 buildStrikethroughRoot uses the
   // same BuildRootArgs that built the original OPEN-04 root (author + reviewers,
-  // NOT the actor login).
+  // NOT the actor login). Locked spec 2026-05-07: repoUrl is now part of the args
+  // so the repo name renders as a `<repoUrl|repoShortName>` mrkdwn link inside
+  // the strikethrough tildes, matching the live root.
   const repoShortName = ctx.event.payload.repository?.name ?? ctx.event.repo.repo;
+  const repoUrl = `https://github.com/${ctx.event.repo.owner}/${ctx.event.repo.repo}`;
   const struck = buildStrikethroughRoot({
     repoShortName,
+    repoUrl,
     prHtmlUrl: summary.prHtmlUrl,
     authorMention,
     reviewerMentions,
