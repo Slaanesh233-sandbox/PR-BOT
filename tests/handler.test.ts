@@ -189,7 +189,6 @@ interface PrCommentOpts {
   repoName?: string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function prCommentEvent(opts: PrCommentOpts = {}): HandleEventCtx['event'] {
   const repoName = opts.repoName ?? 'sandbox-repo-a';
   const prNumber = opts.prNumber ?? 42;
@@ -225,7 +224,6 @@ interface ReviewCommentOpts {
   repoName?: string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function reviewCommentEvent(opts: ReviewCommentOpts = {}): HandleEventCtx['event'] {
   const repoName = opts.repoName ?? 'sandbox-repo-a';
   const prNumber = opts.prNumber ?? 42;
@@ -257,7 +255,6 @@ interface ReviewerRequestedOpts {
   repoName?: string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function reviewerRequestedEvent(opts: ReviewerRequestedOpts = {}): HandleEventCtx['event'] {
   const repoName = opts.repoName ?? 'sandbox-repo-a';
   const prNumber = opts.prNumber ?? 42;
@@ -291,7 +288,6 @@ interface ReopenOpts {
   repoName?: string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function reopenedEvent(opts: ReopenOpts = {}): HandleEventCtx['event'] {
   const repoName = opts.repoName ?? 'sandbox-repo-a';
   const prNumber = opts.prNumber ?? 42;
@@ -669,5 +665,215 @@ describe('handleEvent — Phase-2 open-class regression (no behavioral change)',
     expect(spies.chatUpdate).not.toHaveBeenCalled();
     expect(spies.reactionsAdd).not.toHaveBeenCalled();
     expect(spies.setFailed).not.toHaveBeenCalled();
+  });
+});
+
+// ===== Phase 3 — THRD-01 review submitted (per-kind dispatch) =============
+
+describe('handleEvent — THRD-01 review submitted', () => {
+  const validBody = `body content\n<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+
+  it('approved → posts thread reply + adds white_check_mark reaction (STAT-01)', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+    });
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const args = spies.postMessage.mock.calls[0]![0] as {
+      channel: string;
+      thread_ts: string;
+      text: string;
+      blocks: unknown;
+    };
+    expect(args.thread_ts).toBe(SAMPLE_TS);
+    expect(args.text).toBe(`:white_check_mark: approved by <@${KAI_SLACK_ID}>`);
+    expect(args.channel).toBe(SANDBOX_CHANNEL_ID);
+    expect(args.blocks).toBeDefined();
+
+    expect(spies.reactionsAdd).toHaveBeenCalledTimes(1);
+    const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as {
+      channel: string;
+      timestamp: string;
+      name: string;
+    };
+    expect(reactArgs.channel).toBe(SANDBOX_CHANNEL_ID);
+    expect(reactArgs.timestamp).toBe(SAMPLE_TS);
+    expect(reactArgs.name).toBe('white_check_mark'); // BARE name (Pitfall 3)
+    expect(reactArgs.name.includes(':')).toBe(false);
+
+    expect(spies.setFailed).not.toHaveBeenCalled();
+  });
+
+  it('changes_requested → :warning: reply + warning reaction', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({ state: 'changes_requested', reviewerLogin: 'reviewer' }),
+    });
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toBe(`:warning: requested changes by <@${KAI_SLACK_ID}>`);
+    const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as { name: string };
+    expect(reactArgs.name).toBe('warning');
+  });
+
+  it('commented → :speech_balloon: reply with NO reaction (STAT-01 explicit)', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({ state: 'commented', reviewerLogin: 'reviewer' }),
+    });
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toBe(`:speech_balloon: commented by <@${KAI_SLACK_ID}>`);
+    expect(spies.reactionsAdd).not.toHaveBeenCalled(); // STAT-01: no reaction for commented
+  });
+
+  it('unmapped reviewer → fallback @-text + warning logged; thread reply still posts', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      users: { kai: KAI_SLACK_ID },
+    });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'unknown-reviewer' }),
+    });
+    expect(spies.warning).toHaveBeenCalledWith(
+      expect.stringMatching(/no Slack ID mapping for github login "unknown-reviewer"/),
+    );
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toBe(':white_check_mark: approved by @unknown-reviewer');
+  });
+});
+
+// ===== Phase 3 — THRD-02 PR comment + review-comment ======================
+
+describe('handleEvent — THRD-02 PR comment', () => {
+  const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+
+  it('single comment → "<@…> commented" (singular grammar; n=1 per event)', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, { event: prCommentEvent({ commenterLogin: 'commenter' }) });
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toBe(`<@${KAI_SLACK_ID}> commented`);
+    expect(args.text).not.toMatch(/published/);
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+  });
+
+  it('two consecutive comments → two thread replies, each "<@…> commented" (no aggregation)', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, { event: prCommentEvent({ commenterLogin: 'commenter' }) });
+    await handleEvent(deps, { event: prCommentEvent({ commenterLogin: 'commenter' }) });
+    expect(spies.postMessage).toHaveBeenCalledTimes(2);
+    expect((spies.postMessage.mock.calls[0]![0] as { text: string }).text).toBe(
+      `<@${KAI_SLACK_ID}> commented`,
+    );
+    expect((spies.postMessage.mock.calls[1]![0] as { text: string }).text).toBe(
+      `<@${KAI_SLACK_ID}> commented`,
+    );
+  });
+
+  it('inline review comment (pull_request_review_comment) → same shape as pr-comment', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, { event: reviewCommentEvent({ commenterLogin: 'commenter' }) });
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toBe(`<@${KAI_SLACK_ID}> commented`);
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+  });
+});
+
+// ===== Phase 3 — THRD-03 reviewer requested ===============================
+
+describe('handleEvent — THRD-03 reviewer requested', () => {
+  const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+
+  it('mentions the requested reviewer FIRST (Pitfall 5 — not the sender)', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, {
+      event: reviewerRequestedEvent({ requestedReviewerLogin: 'reviewer', requesterLogin: 'kai' }),
+    });
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toBe(`review requested from <@${KAI_SLACK_ID}> by <@${KAI_SLACK_ID}>`);
+    // The LITERAL ORDER matters: from first, by second.
+    expect(args.text.indexOf('from')).toBeLessThan(args.text.indexOf('by'));
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+  });
+});
+
+// ===== Phase 3 — THRD-06 reopened =========================================
+
+describe('handleEvent — THRD-06 reopened', () => {
+  const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+  it('posts "<@reopener> reopened"', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, { event: reopenedEvent({ reopenerLogin: 'reopener' }) });
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toBe(`<@${KAI_SLACK_ID}> reopened`);
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+  });
+});
+
+// ===== Phase 3 — STAT-04 reactions error switch ===========================
+
+describe('handleEvent — STAT-04 reactions error switch (Research §4 + Pitfall 16)', () => {
+  const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+
+  function reactionError(code: string): Error & { data: { error: string } } {
+    const err = new Error(`Slack API error: ${code}`) as Error & { data: { error: string } };
+    err.data = { error: code };
+    return err;
+  }
+
+  it('already_reacted → core.info (idempotent re-run; STAT-04)', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsAddImpl: async () => {
+        throw reactionError('already_reacted');
+      },
+    });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+    });
+    expect(spies.postMessage).toHaveBeenCalledTimes(1); // thread reply still landed
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/already_reacted/));
+    expect(spies.setFailed).not.toHaveBeenCalled(); // STAT-04: NOT a failure
+  });
+
+  it('invalid_name → core.setFailed (bot bug per Research §4)', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsAddImpl: async () => {
+        throw reactionError('invalid_name');
+      },
+    });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+    });
+    expect(spies.setFailed).toHaveBeenCalledWith(expect.stringMatching(/invalid_name/));
+  });
+
+  it('ratelimited → core.warning (soft fail)', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsAddImpl: async () => {
+        throw reactionError('ratelimited');
+      },
+    });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+    });
+    expect(spies.warning).toHaveBeenCalledWith(expect.stringMatching(/ratelimited/));
+    expect(spies.setFailed).not.toHaveBeenCalled();
+  });
+
+  it('missing_scope → core.setFailed with hint about reactions:write', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsAddImpl: async () => {
+        throw reactionError('missing_scope');
+      },
+    });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+    });
+    expect(spies.setFailed).toHaveBeenCalledWith(
+      expect.stringMatching(/missing_scope|reactions:write/),
+    );
   });
 });
