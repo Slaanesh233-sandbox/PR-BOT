@@ -1,13 +1,27 @@
 // Blocks module — Block Kit builders for the OPEN-04 root message and thread replies.
 //
-// OPEN-04 root format (revised 2026-05-06):
-//   With NO reviewers:    `<repo>: <author-mention> has raised a <link|PR>.`
-//   With reviewers:       `<repo>: <author-mention> has raised a <link|PR>. cc <r1> <r2> …`
+// OPEN-04 root format (locked spec 2026-05-07; supersedes the prior 2026-05-06 phrasing).
+// Every emitted root post — whether the live OPEN-04 root or the STAT-02/STAT-03
+// strikethrough rebuild — follows this template:
 //
-// PR title and branch refs are intentionally NOT part of the message (FLT-06(a)). The code
-// structure prevents leaking them: the input args type omits the title field and both branch
-// fields, so even a future careless caller cannot pipe those values through this builder. The
-// allowlist on the args type below is exhaustive.
+//   With NO reviewers:    `<repoUrl|repoShortName>: <author-mention> has published a
+//                          <prHtmlUrl|pull request>.`
+//   With reviewers:       same, plus ` cc <r1> <r2> …` after the trailing period.
+//
+// Two Slack mrkdwn link forms appear in the output:
+//   - Repo home link: built from `<args.repoUrl|args.repoShortName>` (repo home URL,
+//     not branch / not tree).
+//   - PR link: built from `<args.prHtmlUrl|pull request>` (the literal text "pull
+//     request" is the user-visible click target — not a PR title, not a branch ref).
+//
+// Both are plain mrkdwn links (no `@` after `<`), so FLT-05's user-mention substring
+// gate is unaffected by construction.
+//
+// PR title and branch refs are intentionally NOT part of the message (FLT-06(a)). The
+// code structure prevents leaking them: the input args type omits the title field and
+// both branch fields, so even a future careless caller cannot pipe those values through
+// this builder. The allowlist on the args type below is exhaustive — `repoUrl` is a URL
+// field structurally distinct from title/branch refs.
 //
 // FLT-04 ceiling: every section's text field caps at MAX_SECTION_TEXT_LENGTH = 3000 chars.
 // Overflow truncates to ceiling-1 chars and appends a single-character ellipsis glyph.
@@ -40,6 +54,12 @@ function capSectionText(raw: string): string {
 export interface BuildRootArgs {
   /** `event.repository.name` — short repo name, e.g. `my-pkg` (no owner prefix). Per OPEN-04. */
   readonly repoShortName: string;
+  /**
+   * Repo home URL — `https://github.com/{owner}/{repo}`. Used to render the leading
+   * repo name as a Slack mrkdwn link. Must be the repo home URL, not a branch/tree
+   * URL. (Locked spec 2026-05-07.)
+   */
+  readonly repoUrl: string;
   /** `pull_request.html_url` — the only PR field that flows into the message body. */
   readonly prHtmlUrl: string;
   /** Author mention, already resolved by `mentions.resolve`. */
@@ -54,12 +74,13 @@ export interface BuildRootArgs {
  * Result shape: `{ blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] }`.
  *
  * Note that no PR-title or branch-ref input is accepted by this function — see FLT-06(a).
- * The only fields that can reach Slack via this builder are `repoShortName`, `prHtmlUrl`,
- * and the `text` strings on the supplied `ResolvedMention`s.
+ * The only fields that can reach Slack via this builder are `repoShortName`, `repoUrl`,
+ * `prHtmlUrl`, and the `text` strings on the supplied `ResolvedMention`s.
  */
 export function buildRootMessage(args: BuildRootArgs): { blocks: readonly unknown[] } {
-  const link = `<${args.prHtmlUrl}|PR>`;
-  let raw = `${args.repoShortName}: ${args.authorMention.text} has raised a ${link}.`;
+  const repoLink = `<${args.repoUrl}|${args.repoShortName}>`;
+  const prLink = `<${args.prHtmlUrl}|pull request>`;
+  let raw = `${repoLink}: ${args.authorMention.text} has published a ${prLink}.`;
   if (args.reviewerMentions.length > 0) {
     const cc = args.reviewerMentions.map((m) => m.text).join(' ');
     raw += ` cc ${cc}`;
@@ -88,7 +109,7 @@ export function buildThreadReply(args: BuildReplyArgs): { blocks: readonly unkno
  *
  * Same typed args as buildRootMessage (FLT-06(a) — title and branch refs
  * structurally absent). Wraps the entire rendered text in single tildes (~...~)
- * to render strikethrough across the <link|PR> and the user mentions
+ * to render strikethrough across both mrkdwn links and the user mentions
  * (Research §1b — A2 in Assumptions Log; Plan 03-03 captures the screenshot).
  *
  * Returns BOTH blocks AND text because chat.update needs both: providing text
@@ -102,8 +123,9 @@ export function buildStrikethroughRoot(args: BuildRootArgs): {
   readonly blocks: readonly unknown[];
   readonly text: string;
 } {
-  const link = `<${args.prHtmlUrl}|PR>`;
-  let raw = `${args.repoShortName}: ${args.authorMention.text} has raised a ${link}.`;
+  const repoLink = `<${args.repoUrl}|${args.repoShortName}>`;
+  const prLink = `<${args.prHtmlUrl}|pull request>`;
+  let raw = `${repoLink}: ${args.authorMention.text} has published a ${prLink}.`;
   if (args.reviewerMentions.length > 0) {
     const cc = args.reviewerMentions.map((m) => m.text).join(' ');
     raw += ` cc ${cc}`;
