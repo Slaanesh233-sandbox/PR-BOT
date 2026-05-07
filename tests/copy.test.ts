@@ -1,68 +1,31 @@
 // Tests for src/lib/copy.ts.
 //
-// D-06: comment-count grammar special-cases the singular form:
-//   N=1 → 'commented'  (NOT the awkward 'published 1 comments')
-//   N>1 → 'published N comments'
-// N≤0 is invalid; we throw RangeError to fail loudly rather than emit empty copy.
+// D-06 SUPERSEDED 2026-05-07: per-event count is ALWAYS rendered as
+//   `published N comment(s) on the pull request` (PR-conversation thread reply via
+//   formatPrCommentReply) or
+//   `published N inline comment(s) on the pull request` (review-comment thread reply
+//   via formatReviewCommentReply),
+//   regardless of N. The original singular special-case from D-06 is gone; `s` suffix
+//   is conditional on N >= 2 only. N <= 0 / non-integer still throws RangeError to
+//   fail loudly rather than emit empty copy.
 //
-// REVIEW_VERDICT lookup table provides emoji + verb for each review state.
+// REVIEW_REACTION + TERMINAL_REACTION lookup tables remain (still consumed by the
+// dispatcher in src/index.ts).
 
 import { describe, expect, it } from 'vitest';
 
 import {
   REVIEW_REACTION,
-  REVIEW_VERDICT,
   TERMINAL_REACTION,
-  commentGrammar,
   formatCloseReply,
-  formatCommentReply,
   formatMergeReply,
+  formatPrCommentReply,
   formatReopenReply,
   formatRequestedReviewReply,
+  formatReviewCommentReply,
   formatReviewReply,
 } from '../src/lib/copy.js';
 import type { ResolvedMention } from '../src/lib/types.js';
-
-describe('commentGrammar', () => {
-  it("returns 'commented' for the singular case (N=1) — D-06 special case", () => {
-    expect(commentGrammar(1)).toBe('commented');
-  });
-
-  it("returns 'published 2 comments' for N=2", () => {
-    expect(commentGrammar(2)).toBe('published 2 comments');
-  });
-
-  it("returns 'published 5 comments' for N=5", () => {
-    expect(commentGrammar(5)).toBe('published 5 comments');
-  });
-
-  it('throws RangeError for N=0 (invalid input per D-06)', () => {
-    expect(() => commentGrammar(0)).toThrow(RangeError);
-  });
-
-  it('throws RangeError for negative or non-integer N', () => {
-    expect(() => commentGrammar(-1)).toThrow(RangeError);
-    expect(() => commentGrammar(1.5)).toThrow(RangeError);
-    expect(() => commentGrammar(Number.NaN)).toThrow(RangeError);
-  });
-});
-
-describe('REVIEW_VERDICT', () => {
-  it("approved: emoji ':white_check_mark:', verb 'approved'", () => {
-    expect(REVIEW_VERDICT.approved.emoji).toBe(':white_check_mark:');
-    expect(REVIEW_VERDICT.approved.verb).toBe('approved');
-  });
-
-  it("changes_requested: emoji ':warning:', verb 'requested changes'", () => {
-    expect(REVIEW_VERDICT.changes_requested.emoji).toBe(':warning:');
-    expect(REVIEW_VERDICT.changes_requested.verb).toBe('requested changes');
-  });
-
-  it("commented: emoji ':speech_balloon:', verb 'commented'", () => {
-    expect(REVIEW_VERDICT.commented.emoji).toBe(':speech_balloon:');
-    expect(REVIEW_VERDICT.commented.verb).toBe('commented');
-  });
-});
 
 describe('REVIEW_REACTION (Pitfall 3 — bare names for reactions.add)', () => {
   it("approved is the bare name 'white_check_mark' (no colons)", () => {
@@ -85,21 +48,21 @@ describe('TERMINAL_REACTION (Pitfall 3 — bare names)', () => {
   });
 });
 
-describe('formatReviewReply (THRD-01)', () => {
+describe('formatReviewReply (THRD-01 — actor-first, locked spec 2026-05-07)', () => {
   const m = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'r' });
-  it("approved → ':white_check_mark: approved by ' + reviewer mention", () => {
+  it("approved → ':white_check_mark: <reviewer> approved the pull request'", () => {
     expect(formatReviewReply({ state: 'approved', reviewerMention: m('<@U123>') })).toBe(
-      ':white_check_mark: approved by <@U123>',
+      ':white_check_mark: <@U123> approved the pull request',
     );
   });
-  it("changes_requested → ':warning: requested changes by '", () => {
+  it("changes_requested → ':warning: <reviewer> requested changes on the pull request'", () => {
     expect(formatReviewReply({ state: 'changes_requested', reviewerMention: m('<@U123>') })).toBe(
-      ':warning: requested changes by <@U123>',
+      ':warning: <@U123> requested changes on the pull request',
     );
   });
-  it("commented → ':speech_balloon: commented by '", () => {
+  it("commented → ':speech_balloon: <reviewer> commented on the pull request'", () => {
     expect(formatReviewReply({ state: 'commented', reviewerMention: m('<@U123>') })).toBe(
-      ':speech_balloon: commented by <@U123>',
+      ':speech_balloon: <@U123> commented on the pull request',
     );
   });
   it('fallback mention text flows through unchanged', () => {
@@ -108,49 +71,82 @@ describe('formatReviewReply (THRD-01)', () => {
         state: 'approved',
         reviewerMention: { kind: 'fallback', text: '@unmapped', login: 'unmapped' },
       }),
-    ).toBe(':white_check_mark: approved by @unmapped');
+    ).toBe(':white_check_mark: @unmapped approved the pull request');
   });
 });
 
-describe('formatCommentReply (THRD-02 grammar pass-through)', () => {
+describe('formatPrCommentReply (THRD-02 PR-conversation; always explicit count — supersedes D-06)', () => {
   const m = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'c' });
-  it("n=1 → mention + ' commented'", () => {
-    expect(formatCommentReply({ commenterMention: m('<@U123>'), n: 1 })).toBe('<@U123> commented');
-  });
-  it("n=2 → mention + ' published 2 comments'", () => {
-    expect(formatCommentReply({ commenterMention: m('<@U123>'), n: 2 })).toBe(
-      '<@U123> published 2 comments',
+  it("n=1 → '<m> published 1 comment on the pull request'", () => {
+    expect(formatPrCommentReply({ commenterMention: m('<@U123>'), n: 1 })).toBe(
+      '<@U123> published 1 comment on the pull request',
     );
   });
-  it("n=5 → 'published 5 comments'", () => {
-    expect(formatCommentReply({ commenterMention: m('<@U123>'), n: 5 })).toBe(
-      '<@U123> published 5 comments',
+  it("n=2 → '<m> published 2 comments on the pull request'", () => {
+    expect(formatPrCommentReply({ commenterMention: m('<@U123>'), n: 2 })).toBe(
+      '<@U123> published 2 comments on the pull request',
     );
   });
-  it('throws on n=0 (delegated to commentGrammar)', () => {
-    expect(() => formatCommentReply({ commenterMention: m('x'), n: 0 })).toThrow(RangeError);
+  it("n=5 → '<m> published 5 comments on the pull request'", () => {
+    expect(formatPrCommentReply({ commenterMention: m('<@U123>'), n: 5 })).toBe(
+      '<@U123> published 5 comments on the pull request',
+    );
+  });
+  it('throws RangeError on n=0 / negative / non-integer', () => {
+    expect(() => formatPrCommentReply({ commenterMention: m('x'), n: 0 })).toThrow(RangeError);
+    expect(() => formatPrCommentReply({ commenterMention: m('x'), n: -1 })).toThrow(RangeError);
+    expect(() => formatPrCommentReply({ commenterMention: m('x'), n: 1.5 })).toThrow(RangeError);
   });
 });
 
-describe('formatRequestedReviewReply / formatReopenReply / formatMergeReply / formatCloseReply', () => {
+describe('formatReviewCommentReply (THRD-02 inline review-comment; always explicit count)', () => {
+  const m = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'c' });
+  it("n=1 → '<m> published 1 inline comment on the pull request'", () => {
+    expect(formatReviewCommentReply({ commenterMention: m('<@U123>'), n: 1 })).toBe(
+      '<@U123> published 1 inline comment on the pull request',
+    );
+  });
+  it("n=2 → '<m> published 2 inline comments on the pull request'", () => {
+    expect(formatReviewCommentReply({ commenterMention: m('<@U123>'), n: 2 })).toBe(
+      '<@U123> published 2 inline comments on the pull request',
+    );
+  });
+  it("n=5 → '<m> published 5 inline comments on the pull request'", () => {
+    expect(formatReviewCommentReply({ commenterMention: m('<@U123>'), n: 5 })).toBe(
+      '<@U123> published 5 inline comments on the pull request',
+    );
+  });
+  it('throws RangeError on n=0 / negative / non-integer', () => {
+    expect(() => formatReviewCommentReply({ commenterMention: m('x'), n: 0 })).toThrow(RangeError);
+    expect(() => formatReviewCommentReply({ commenterMention: m('x'), n: -1 })).toThrow(RangeError);
+    expect(() => formatReviewCommentReply({ commenterMention: m('x'), n: 1.5 })).toThrow(
+      RangeError,
+    );
+  });
+});
+
+describe('formatRequestedReviewReply / formatReopenReply / formatMergeReply / formatCloseReply (actor-first, locked spec 2026-05-07)', () => {
   const m = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'x' });
-  it('formatRequestedReviewReply → review requested from <reviewer> by <requester>', () => {
+  it('formatRequestedReviewReply → "<reviewer> was added as a reviewer on the pull request"', () => {
     expect(
       formatRequestedReviewReply({
         requestedReviewerMention: m('<@URev>'),
-        requesterMention: m('<@UReq>'),
       }),
-    ).toBe('review requested from <@URev> by <@UReq>');
+    ).toBe('<@URev> was added as a reviewer on the pull request');
   });
-  it("formatReopenReply → mention + ' reopened'", () => {
-    expect(formatReopenReply({ reopenerMention: m('<@UReo>') })).toBe('<@UReo> reopened');
+  it("formatReopenReply → '<reopener> reopened the pull request'", () => {
+    expect(formatReopenReply({ reopenerMention: m('<@UReo>') })).toBe(
+      '<@UReo> reopened the pull request',
+    );
   });
-  it("formatMergeReply → ':tada: merged by ' + mention", () => {
-    expect(formatMergeReply({ mergerMention: m('<@UMerg>') })).toBe(':tada: merged by <@UMerg>');
+  it("formatMergeReply → ':tada: <merger> merged the pull request'", () => {
+    expect(formatMergeReply({ mergerMention: m('<@UMerg>') })).toBe(
+      ':tada: <@UMerg> merged the pull request',
+    );
   });
-  it("formatCloseReply → ':no_entry_sign: closed by ' + mention", () => {
+  it("formatCloseReply → ':no_entry_sign: <closer> closed the pull request'", () => {
     expect(formatCloseReply({ closerMention: m('<@UClos>') })).toBe(
-      ':no_entry_sign: closed by <@UClos>',
+      ':no_entry_sign: <@UClos> closed the pull request',
     );
   });
 });
