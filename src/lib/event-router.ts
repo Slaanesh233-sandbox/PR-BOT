@@ -107,10 +107,7 @@ interface ReviewCommentPayload {
  * `github.context.payload` which is `any` in practice; we narrow internally to small
  * allowlisted shapes (`*Payload`) that include only the fields we actually use.
  */
-export function classify(event: {
-  readonly name: string;
-  readonly payload: unknown;
-}): RoutedEvent {
+export function classify(event: { readonly name: string; readonly payload: unknown }): RoutedEvent {
   if (event.name === 'pull_request') {
     return classifyPullRequest(event.payload as PrPayload);
   }

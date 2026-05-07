@@ -93,9 +93,9 @@ describe('formatReviewReply (THRD-01)', () => {
     );
   });
   it("changes_requested → ':warning: requested changes by '", () => {
-    expect(
-      formatReviewReply({ state: 'changes_requested', reviewerMention: m('<@U123>') }),
-    ).toBe(':warning: requested changes by <@U123>');
+    expect(formatReviewReply({ state: 'changes_requested', reviewerMention: m('<@U123>') })).toBe(
+      ':warning: requested changes by <@U123>',
+    );
   });
   it("commented → ':speech_balloon: commented by '", () => {
     expect(formatReviewReply({ state: 'commented', reviewerMention: m('<@U123>') })).toBe(
@@ -115,9 +115,7 @@ describe('formatReviewReply (THRD-01)', () => {
 describe('formatCommentReply (THRD-02 grammar pass-through)', () => {
   const m = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'c' });
   it("n=1 → mention + ' commented'", () => {
-    expect(formatCommentReply({ commenterMention: m('<@U123>'), n: 1 })).toBe(
-      '<@U123> commented',
-    );
+    expect(formatCommentReply({ commenterMention: m('<@U123>'), n: 1 })).toBe('<@U123> commented');
   });
   it("n=2 → mention + ' published 2 comments'", () => {
     expect(formatCommentReply({ commenterMention: m('<@U123>'), n: 2 })).toBe(

@@ -82,3 +82,36 @@ export function buildThreadReply(args: BuildReplyArgs): { blocks: readonly unkno
     blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capSectionText(args.text) } }],
   };
 }
+
+/**
+ * STAT-02 / STAT-03 strikethrough rebuild of the OPEN-04 root message.
+ *
+ * Same typed args as buildRootMessage (FLT-06(a) — title and branch refs
+ * structurally absent). Wraps the entire rendered text in single tildes (~...~)
+ * to render strikethrough across the <link|PR> and the user mentions
+ * (Research §1b — A2 in Assumptions Log; Plan 03-03 captures the screenshot).
+ *
+ * Returns BOTH blocks AND text because chat.update needs both: providing text
+ * without blocks REPLACES the previous blocks with plain text (Pitfall 2). The
+ * handler dispatcher in Plan 03-02 calls
+ *   slack.chat.update({ channel, ts: rootTs, blocks: r.blocks, text: r.text }).
+ *
+ * Both fields run through capSectionText so FLT-04 still applies after the wrap.
+ */
+export function buildStrikethroughRoot(args: BuildRootArgs): {
+  readonly blocks: readonly unknown[];
+  readonly text: string;
+} {
+  const link = `<${args.prHtmlUrl}|PR>`;
+  let raw = `${args.repoShortName}: ${args.authorMention.text} has raised a ${link}.`;
+  if (args.reviewerMentions.length > 0) {
+    const cc = args.reviewerMentions.map((m) => m.text).join(' ');
+    raw += ` cc ${cc}`;
+  }
+  const struck = `~${raw}~`;
+  const capped = capSectionText(struck);
+  return {
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capped } }],
+    text: capped,
+  };
+}

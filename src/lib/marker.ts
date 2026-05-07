@@ -6,6 +6,9 @@
 //   under float and the thread can no longer be re-located.
 // FND-06: parse(serialize(ts)) === ts (string equality) for ts strings with
 //   significant trailing zeros. Asserted by tests/marker.test.ts.
+// FLT-02: SILENT_MARKER + isSilent are exact-match (no regex, no case-fold) —
+//   leniency creates ambiguity (Pitfall 17). Same prefix and trailing
+//   space-dash-dash-gt closer as the thread_ts marker for visual consistency.
 // T-01-12: enforced via the plan's CI grep that asserts no float-coercion
 //   call site exists in this file.
 
@@ -69,4 +72,20 @@ export function strip(body: string): string {
     .replace(MARKER_REGEX, '')
     .replace(/\n{3,}/g, '\n\n')
     .trimEnd();
+}
+
+/**
+ * FLT-02 silent-opt-out marker. Exact case-sensitive substring; no whitespace
+ * tolerance, no regex (Pitfall 17 — leniency creates ambiguity). Matches D-02's
+ * marker-shape convention (the `<!-- pr-bot:<token> -->` shape) — same prefix
+ * and same trailing closer.
+ */
+export const SILENT_MARKER = '<!-- pr-bot:silent -->';
+
+/**
+ * Returns true if `body` contains the FLT-02 silent-opt-out marker. Exact
+ * substring check, NOT regex — case-sensitive AND whitespace-strict by intent.
+ */
+export function isSilent(body: string): boolean {
+  return body.includes(SILENT_MARKER);
 }

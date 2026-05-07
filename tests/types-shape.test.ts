@@ -113,9 +113,9 @@ describe('types — FLT-06 forbidden-fields allowlist (compile-time)', () => {
       prCreatedAt: '2026-01-01T00:00:00Z',
     };
     // @ts-expect-error — body must NOT be present on ReviewSummary (FLT-06)
-    sample.body;
+    void sample.body;
     // @ts-expect-error — title must NOT be present on ReviewSummary (FLT-06)
-    sample.title;
+    void sample.title;
     expect(sample.state).toBe('approved');
   });
 
@@ -128,7 +128,7 @@ describe('types — FLT-06 forbidden-fields allowlist (compile-time)', () => {
       prCreatedAt: '2026-01-01T00:00:00Z',
     };
     // @ts-expect-error — body must NOT be present (FLT-06)
-    sample.body;
+    void sample.body;
     expect(sample.commenterLogin).toBe('kai');
   });
 
@@ -141,7 +141,7 @@ describe('types — FLT-06 forbidden-fields allowlist (compile-time)', () => {
       prCreatedAt: '2026-01-01T00:00:00Z',
     };
     // @ts-expect-error — body must NOT be present (FLT-06)
-    sample.body;
+    void sample.body;
     expect(sample.commenterLogin).toBe('kai');
   });
 
@@ -170,11 +170,11 @@ describe('types — FLT-06 forbidden-fields allowlist (compile-time)', () => {
       prCreatedAt: '2026-01-01T00:00:00Z',
     };
     // @ts-expect-error — title field forbidden (FLT-06)
-    a.title;
+    void a.title;
     // @ts-expect-error — title field forbidden (FLT-06)
-    b.title;
+    void b.title;
     // @ts-expect-error — body field forbidden (FLT-06)
-    c.body;
+    void c.body;
     expect(a.requestedReviewerLogin).toBe('r');
     expect(b.actorLogin).toBe('m');
     expect(c.reopenerLogin).toBe('k');
