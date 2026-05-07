@@ -317,7 +317,6 @@ interface MergedOpts {
   senderType?: string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function mergedEvent(opts: MergedOpts = {}): HandleEventCtx['event'] {
   const repoName = opts.repoName ?? 'sandbox-repo-a';
   const prNumber = 42;
@@ -350,7 +349,6 @@ interface CloseWithoutMergeOpts {
   senderType?: string;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function closedWithoutMergeEvent(opts: CloseWithoutMergeOpts = {}): HandleEventCtx['event'] {
   const repoName = opts.repoName ?? 'sandbox-repo-a';
   const prNumber = 42;
@@ -875,5 +873,166 @@ describe('handleEvent — STAT-04 reactions error switch (Research §4 + Pitfall
     expect(spies.setFailed).toHaveBeenCalledWith(
       expect.stringMatching(/missing_scope|reactions:write/),
     );
+  });
+});
+
+// ===== Phase 3 — THRD-04 + STAT-02 merge (multi-call dispatcher) ==========
+
+describe('handleEvent — THRD-04 + STAT-02 merge (multi-call dispatcher)', () => {
+  const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+
+  it('happy path: posts thread reply + adds tada + chat.update strikethrough (no reviewers)', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, { event: mergedEvent({ mergerLogin: 'merger' }) });
+
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.reactionsAdd).toHaveBeenCalledTimes(1);
+    expect(spies.chatUpdate).toHaveBeenCalledTimes(1);
+    expect(spies.setFailed).not.toHaveBeenCalled();
+
+    // Reply text — THRD-04 verbatim.
+    const postArgs = spies.postMessage.mock.calls[0]![0] as { text: string; thread_ts: string };
+    expect(postArgs.text).toBe(`:tada: merged by <@${KAI_SLACK_ID}>`);
+    expect(postArgs.thread_ts).toBe(SAMPLE_TS);
+
+    // Reaction — STAT-02 (BARE name).
+    const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as { name: string; timestamp: string };
+    expect(reactArgs.name).toBe('tada');
+    expect(reactArgs.timestamp).toBe(SAMPLE_TS);
+
+    // chat.update — Pitfall 2 dual args, Pitfall 9 no thread_ts, exact strikethrough text.
+    const updateArgs = spies.chatUpdate.mock.calls[0]![0] as {
+      channel: string;
+      ts: string;
+      text: string;
+      blocks: unknown;
+      thread_ts?: string;
+    };
+    expect(updateArgs.ts).toBe(SAMPLE_TS);
+    expect(updateArgs.channel).toBe(SANDBOX_CHANNEL_ID);
+    expect(updateArgs.text).toBe(
+      `~sandbox-repo-a: <@${KAI_SLACK_ID}> has raised a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|PR>.~`,
+    );
+    expect(updateArgs.blocks).toBeDefined();
+    expect(updateArgs.thread_ts).toBeUndefined(); // Pitfall 9
+  });
+
+  it('with reviewers: chat.update strikethrough wraps cc clause too', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      users: { kai: KAI_SLACK_ID, merger: KAI_SLACK_ID, r1: KAI_SLACK_ID, r2: KAI_SLACK_ID },
+    });
+    await handleEvent(deps, {
+      event: mergedEvent({ mergerLogin: 'merger', reviewers: ['r1', 'r2'] }),
+    });
+    const updateArgs = spies.chatUpdate.mock.calls[0]![0] as { text: string };
+    expect(updateArgs.text).toBe(
+      `~sandbox-repo-a: <@${KAI_SLACK_ID}> has raised a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|PR>. cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>~`,
+    );
+  });
+
+  it('multi-call ordering: postMessage → reactions.add → chat.update', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, { event: mergedEvent({ mergerLogin: 'merger' }) });
+    const order1 = spies.postMessage.mock.invocationCallOrder[0]!;
+    const order2 = spies.reactionsAdd.mock.invocationCallOrder[0]!;
+    const order3 = spies.chatUpdate.mock.invocationCallOrder[0]!;
+    expect(order1).toBeLessThan(order2);
+    expect(order2).toBeLessThan(order3);
+  });
+
+  it('thread-reply failure → setFailed; reactions + chat.update NOT attempted', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      postMessageImpl: async () => {
+        throw new Error('not_in_channel');
+      },
+    });
+    await handleEvent(deps, { event: mergedEvent({ mergerLogin: 'merger' }) });
+    expect(spies.setFailed).toHaveBeenCalledWith(expect.stringMatching(/not_in_channel|invite/));
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).not.toHaveBeenCalled();
+  });
+
+  it('reactions failure → warning; chat.update STILL attempted', async () => {
+    const reactErr = new Error('Slack ratelimit') as Error & { data: { error: string } };
+    reactErr.data = { error: 'ratelimited' };
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      reactionsAddImpl: async () => {
+        throw reactErr;
+      },
+    });
+    await handleEvent(deps, { event: mergedEvent({ mergerLogin: 'merger' }) });
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.warning).toHaveBeenCalledWith(expect.stringMatching(/ratelimited/));
+    expect(spies.chatUpdate).toHaveBeenCalledTimes(1); // CRITICAL: still ran
+    expect(spies.setFailed).not.toHaveBeenCalled();
+  });
+
+  it('chat.update failure → warning; thread reply + reaction already landed', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: validBody,
+      chatUpdateImpl: async () => {
+        throw new Error('edit_window_closed');
+      },
+    });
+    await handleEvent(deps, { event: mergedEvent({ mergerLogin: 'merger' }) });
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.reactionsAdd).toHaveBeenCalledTimes(1);
+    expect(spies.warning).toHaveBeenCalledWith(
+      expect.stringMatching(/edit_window_closed|chat\.update/),
+    );
+    expect(spies.setFailed).not.toHaveBeenCalled();
+  });
+});
+
+// ===== Phase 3 — THRD-05 + STAT-03 close-without-merge ====================
+
+describe('handleEvent — THRD-05 + STAT-03 close-without-merge', () => {
+  const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+
+  it('happy path: ":no_entry_sign: closed by" reply + no_entry_sign reaction + chat.update strikethrough', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
+    await handleEvent(deps, { event: closedWithoutMergeEvent({ closerLogin: 'closer' }) });
+
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.reactionsAdd).toHaveBeenCalledTimes(1);
+    expect(spies.chatUpdate).toHaveBeenCalledTimes(1);
+
+    const postArgs = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(postArgs.text).toBe(`:no_entry_sign: closed by <@${KAI_SLACK_ID}>`);
+    const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as { name: string };
+    expect(reactArgs.name).toBe('no_entry_sign');
+    const updateArgs = spies.chatUpdate.mock.calls[0]![0] as { text: string };
+    expect(updateArgs.text).toMatch(/^~sandbox-repo-a: .* has raised a .*\|PR>\.~$/);
+  });
+});
+
+// ===== Phase 3 — FLT-02 + THRD-07 ALSO apply on terminal events ===========
+
+describe('handleEvent — FLT-02 + THRD-07 ALSO apply on terminal events', () => {
+  it('FLT-02: silent marker present → zero calls on merged', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: `<!-- pr-bot:silent -->\n<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`,
+    });
+    await handleEvent(deps, { event: mergedEvent({ mergerLogin: 'merger' }) });
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).not.toHaveBeenCalled();
+  });
+
+  it('THRD-07: marker absent + created_at >60s ago → warning; zero calls on merged', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: 'no marker here' });
+    await handleEvent(deps, {
+      event: mergedEvent({
+        mergerLogin: 'merger',
+        prCreatedAt: new Date(Date.now() - 120_000).toISOString(),
+      }),
+    });
+    expect(spies.warning).toHaveBeenCalledTimes(1);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).not.toHaveBeenCalled();
   });
 });
