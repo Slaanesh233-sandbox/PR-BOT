@@ -71,9 +71,86 @@ export interface PrSummary {
   readonly authorLogin: GitHubLogin;
 }
 
+// === Phase 3 — event-family allowlist summary types ====================
+//
+// FORBIDDEN FIELDS on every *Summary below (do not add): title, baseRef, headRef,
+// body, review.body, comment.body, base.ref, head.ref. These are trust-boundary
+// leaks per FLT-06(a). The CI Gate 8 grep against src/lib/blocks.ts + src/index.ts
+// is the second-line defense; the type-allowlist here is the first line. Adding
+// any of these fields is a trust-boundary review (and will fail typecheck on the
+// type-only assertions in tests/types-shape.test.ts).
+//
+// `prCreatedAt` is the ISO-8601 string from payload.pull_request.created_at — the
+// THRD-07 graceful-skip anchor (Pitfall 11; never use updated_at).
+// `prAuthorLogin` is the original PR author — Plan 03-02 needs it for the
+// strikethrough rebuild on merged/closed (the strikethrough re-renders the OPEN-04
+// root line, which mentions the AUTHOR, not the merger/closer).
+
+export interface ReviewSummary {
+  readonly state: 'approved' | 'changes_requested' | 'commented';
+  readonly reviewerLogin: GitHubLogin;
+  readonly prNumber: number;
+  readonly prHtmlUrl: string;
+  readonly prAuthorLogin: GitHubLogin;
+  readonly prCreatedAt: string;
+}
+
+export interface IssueCommentSummary {
+  readonly commenterLogin: GitHubLogin;
+  readonly prNumber: number;
+  readonly prHtmlUrl: string;
+  readonly prAuthorLogin: GitHubLogin;
+  readonly prCreatedAt: string;
+}
+
+export interface ReviewCommentSummary {
+  readonly commenterLogin: GitHubLogin;
+  readonly prNumber: number;
+  readonly prHtmlUrl: string;
+  readonly prAuthorLogin: GitHubLogin;
+  readonly prCreatedAt: string;
+}
+
+export interface ReviewerRequestSummary {
+  readonly requestedReviewerLogin: GitHubLogin;
+  readonly requesterLogin: GitHubLogin;
+  readonly prNumber: number;
+  readonly prHtmlUrl: string;
+  readonly prAuthorLogin: GitHubLogin;
+  readonly prCreatedAt: string;
+}
+
+export interface TerminalSummary {
+  // Used by both 'merged' and 'closed-without-merge' kinds. The actor login is
+  // distinguished by the kind (merger on 'merged', closer on 'closed-without-merge').
+  readonly actorLogin: GitHubLogin;
+  readonly prNumber: number;
+  readonly prHtmlUrl: string;
+  readonly prAuthorLogin: GitHubLogin;
+  readonly prCreatedAt: string;
+  // Cumulative reviewer logins at event time; preserves order. Used by Plan 03-02
+  // strikethrough rebuild to regenerate the OPEN-04 cc clause.
+  readonly reviewerLogins: readonly GitHubLogin[];
+}
+
+export interface ReopenSummary {
+  readonly reopenerLogin: GitHubLogin;
+  readonly prNumber: number;
+  readonly prHtmlUrl: string;
+  readonly prAuthorLogin: GitHubLogin;
+  readonly prCreatedAt: string;
+}
+
 // Event-router output (consumed by event-router.ts in Plan 03b): a description of what to do,
 // NOT the side-effect itself.
 export type RoutedEvent =
   | { readonly kind: 'open'; readonly pr: PrSummary; readonly reviewers: readonly GitHubLogin[] }
   | { readonly kind: 'thread-reply'; readonly text: string; readonly emoji?: string }
-  | { readonly kind: 'skip'; readonly reason: string };
+  | { readonly kind: 'skip'; readonly reason: string }
+  | { readonly kind: 'review-submitted'; readonly summary: ReviewSummary }
+  | { readonly kind: 'pr-comment'; readonly summary: IssueCommentSummary }
+  | { readonly kind: 'review-comment'; readonly summary: ReviewCommentSummary }
+  | { readonly kind: 'reviewer-requested'; readonly summary: ReviewerRequestSummary }
+  | { readonly kind: 'merged'; readonly summary: TerminalSummary }
+  | { readonly kind: 'closed-without-merge'; readonly summary: TerminalSummary }
+  | { readonly kind: 'reopened'; readonly summary: ReopenSummary };
