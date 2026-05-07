@@ -21,6 +21,9 @@ interface MockOverrides {
   pullsGetBody?: string | null;
   pullsUpdateImpl?: () => Promise<unknown>;
   users?: Record<string, string>;
+  // Phase 3 additions:
+  chatUpdateImpl?: () => Promise<{ ok: boolean; error?: string }>;
+  reactionsAddImpl?: () => Promise<{ ok: boolean; error?: string }>;
 }
 
 function makeMockDeps(overrides: MockOverrides = {}): {
@@ -32,25 +35,47 @@ function makeMockDeps(overrides: MockOverrides = {}): {
     info: ReturnType<typeof vi.fn>;
     warning: ReturnType<typeof vi.fn>;
     setFailed: ReturnType<typeof vi.fn>;
+    // Phase 3 spies:
+    chatUpdate: ReturnType<typeof vi.fn>;
+    reactionsAdd: ReturnType<typeof vi.fn>;
   };
 } {
   const postMessageResult = overrides.postMessageResult ?? { ok: true, ts: SAMPLE_TS };
   const pullsGetBody =
     overrides.pullsGetBody === undefined ? 'original PR body' : overrides.pullsGetBody;
-  const users = overrides.users ?? { kai: KAI_SLACK_ID, 'dummy-reviewer': KAI_SLACK_ID };
+  const users =
+    overrides.users ??
+    ({
+      kai: KAI_SLACK_ID,
+      'dummy-reviewer': KAI_SLACK_ID,
+      reviewer: KAI_SLACK_ID,
+      commenter: KAI_SLACK_ID,
+      merger: KAI_SLACK_ID,
+      closer: KAI_SLACK_ID,
+      reopener: KAI_SLACK_ID,
+      r1: KAI_SLACK_ID,
+      r2: KAI_SLACK_ID,
+    } as Record<string, string>);
   const pullsUpdateImpl = overrides.pullsUpdateImpl ?? (async () => ({ data: {} }));
+  const chatUpdateImpl = overrides.chatUpdateImpl ?? (async () => ({ ok: true }));
+  const reactionsAddImpl = overrides.reactionsAddImpl ?? (async () => ({ ok: true }));
 
   const postMessage = overrides.postMessageImpl
     ? vi.fn().mockImplementation(overrides.postMessageImpl)
     : vi.fn().mockResolvedValue(postMessageResult);
   const pullsGet = vi.fn().mockResolvedValue({ data: { body: pullsGetBody } });
   const pullsUpdate = vi.fn().mockImplementation(pullsUpdateImpl);
+  const chatUpdate = vi.fn().mockImplementation(chatUpdateImpl);
+  const reactionsAdd = vi.fn().mockImplementation(reactionsAddImpl);
   const info = vi.fn();
   const warning = vi.fn();
   const setFailed = vi.fn();
 
   const deps: Deps = {
-    slack: { chat: { postMessage } } as unknown as Deps['slack'],
+    slack: {
+      chat: { postMessage, update: chatUpdate },
+      reactions: { add: reactionsAdd },
+    } as unknown as Deps['slack'],
     octokit: {
       rest: { pulls: { get: pullsGet, update: pullsUpdate } },
     } as unknown as Deps['octokit'],
@@ -62,7 +87,19 @@ function makeMockDeps(overrides: MockOverrides = {}): {
     sleep: async () => {}, // fast-forward retry delays in tests
   };
 
-  return { deps, spies: { postMessage, pullsGet, pullsUpdate, info, warning, setFailed } };
+  return {
+    deps,
+    spies: {
+      postMessage,
+      pullsGet,
+      pullsUpdate,
+      info,
+      warning,
+      setFailed,
+      chatUpdate,
+      reactionsAdd,
+    },
+  };
 }
 
 interface OpenedEventOpts {
@@ -101,6 +138,243 @@ function openedEvent(opts: OpenedEventOpts = {}): HandleEventCtx['event'] {
       },
       repository: { name: repoName, full_name: repoFullName },
     },
+    repo: { owner: 'Slaanesh233-sandbox', repo: repoName },
+  };
+}
+
+// === Phase 3 fixture builders ============================================
+// Default `created_at` is ~1 hour in the past, so THRD-07 race-window logic
+// does NOT trigger by default. Opt in to the race-window via prCreatedAt.
+const OLD_CREATED_AT = new Date(Date.now() - 3600_000).toISOString();
+const RECENT_CREATED_AT = new Date(Date.now() - 5_000).toISOString();
+
+interface ReviewSubmittedOpts {
+  state?: 'approved' | 'changes_requested' | 'commented';
+  reviewerLogin?: string;
+  prNumber?: number;
+  prCreatedAt?: string;
+  senderLogin?: string;
+  senderType?: string;
+  repoName?: string;
+}
+
+function reviewSubmittedEvent(opts: ReviewSubmittedOpts = {}): HandleEventCtx['event'] {
+  const repoName = opts.repoName ?? 'sandbox-repo-a';
+  const prNumber = opts.prNumber ?? 42;
+  const reviewerLogin = opts.reviewerLogin ?? 'reviewer';
+  return {
+    name: 'pull_request_review' as const,
+    payload: {
+      action: 'submitted',
+      sender: { login: opts.senderLogin ?? reviewerLogin, type: opts.senderType ?? 'User' },
+      review: { state: opts.state ?? 'approved', user: { login: reviewerLogin } },
+      pull_request: {
+        number: prNumber,
+        html_url: `https://github.com/Slaanesh233-sandbox/${repoName}/pull/${prNumber}`,
+        user: { login: 'kai' },
+        created_at: opts.prCreatedAt ?? OLD_CREATED_AT,
+      },
+      repository: { name: repoName, full_name: `Slaanesh233-sandbox/${repoName}` },
+    } as unknown as HandleEventCtx['event']['payload'],
+    repo: { owner: 'Slaanesh233-sandbox', repo: repoName },
+  };
+}
+
+interface PrCommentOpts {
+  commenterLogin?: string;
+  prNumber?: number;
+  prCreatedAt?: string;
+  senderLogin?: string;
+  senderType?: string;
+  repoName?: string;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function prCommentEvent(opts: PrCommentOpts = {}): HandleEventCtx['event'] {
+  const repoName = opts.repoName ?? 'sandbox-repo-a';
+  const prNumber = opts.prNumber ?? 42;
+  const commenterLogin = opts.commenterLogin ?? 'commenter';
+  return {
+    name: 'issue_comment' as const,
+    payload: {
+      action: 'created',
+      sender: { login: opts.senderLogin ?? commenterLogin, type: opts.senderType ?? 'User' },
+      comment: { user: { login: commenterLogin } },
+      issue: {
+        number: prNumber,
+        html_url: `https://github.com/Slaanesh233-sandbox/${repoName}/pull/${prNumber}`,
+        user: { login: 'kai' },
+        created_at: opts.prCreatedAt ?? OLD_CREATED_AT,
+        // Pitfall 4 presence-check guard: non-null means PR-comment.
+        pull_request: {
+          url: `https://api.github.com/repos/Slaanesh233-sandbox/${repoName}/pulls/${prNumber}`,
+        },
+      },
+      repository: { name: repoName, full_name: `Slaanesh233-sandbox/${repoName}` },
+    } as unknown as HandleEventCtx['event']['payload'],
+    repo: { owner: 'Slaanesh233-sandbox', repo: repoName },
+  };
+}
+
+interface ReviewCommentOpts {
+  commenterLogin?: string;
+  prNumber?: number;
+  prCreatedAt?: string;
+  senderLogin?: string;
+  senderType?: string;
+  repoName?: string;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function reviewCommentEvent(opts: ReviewCommentOpts = {}): HandleEventCtx['event'] {
+  const repoName = opts.repoName ?? 'sandbox-repo-a';
+  const prNumber = opts.prNumber ?? 42;
+  const commenterLogin = opts.commenterLogin ?? 'commenter';
+  return {
+    name: 'pull_request_review_comment' as const,
+    payload: {
+      action: 'created',
+      sender: { login: opts.senderLogin ?? commenterLogin, type: opts.senderType ?? 'User' },
+      comment: { user: { login: commenterLogin } },
+      pull_request: {
+        number: prNumber,
+        html_url: `https://github.com/Slaanesh233-sandbox/${repoName}/pull/${prNumber}`,
+        user: { login: 'kai' },
+        created_at: opts.prCreatedAt ?? OLD_CREATED_AT,
+      },
+      repository: { name: repoName, full_name: `Slaanesh233-sandbox/${repoName}` },
+    } as unknown as HandleEventCtx['event']['payload'],
+    repo: { owner: 'Slaanesh233-sandbox', repo: repoName },
+  };
+}
+
+interface ReviewerRequestedOpts {
+  requestedReviewerLogin?: string;
+  requesterLogin?: string;
+  prNumber?: number;
+  prCreatedAt?: string;
+  senderType?: string;
+  repoName?: string;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function reviewerRequestedEvent(opts: ReviewerRequestedOpts = {}): HandleEventCtx['event'] {
+  const repoName = opts.repoName ?? 'sandbox-repo-a';
+  const prNumber = opts.prNumber ?? 42;
+  const requesterLogin = opts.requesterLogin ?? 'kai';
+  const requestedReviewerLogin = opts.requestedReviewerLogin ?? 'reviewer';
+  return {
+    name: 'pull_request' as const,
+    payload: {
+      action: 'review_requested',
+      sender: { login: requesterLogin, type: opts.senderType ?? 'User' },
+      // Pitfall 5: top-level requested_reviewer (singular) is the per-event field.
+      requested_reviewer: { login: requestedReviewerLogin },
+      pull_request: {
+        number: prNumber,
+        html_url: `https://github.com/Slaanesh233-sandbox/${repoName}/pull/${prNumber}`,
+        user: { login: 'kai' },
+        created_at: opts.prCreatedAt ?? OLD_CREATED_AT,
+        requested_reviewers: [{ login: requestedReviewerLogin }],
+      },
+      repository: { name: repoName, full_name: `Slaanesh233-sandbox/${repoName}` },
+    } as unknown as HandleEventCtx['event']['payload'],
+    repo: { owner: 'Slaanesh233-sandbox', repo: repoName },
+  };
+}
+
+interface ReopenOpts {
+  reopenerLogin?: string;
+  prNumber?: number;
+  prCreatedAt?: string;
+  senderType?: string;
+  repoName?: string;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function reopenedEvent(opts: ReopenOpts = {}): HandleEventCtx['event'] {
+  const repoName = opts.repoName ?? 'sandbox-repo-a';
+  const prNumber = opts.prNumber ?? 42;
+  const reopenerLogin = opts.reopenerLogin ?? 'reopener';
+  return {
+    name: 'pull_request' as const,
+    payload: {
+      action: 'reopened',
+      sender: { login: reopenerLogin, type: opts.senderType ?? 'User' },
+      pull_request: {
+        number: prNumber,
+        html_url: `https://github.com/Slaanesh233-sandbox/${repoName}/pull/${prNumber}`,
+        user: { login: 'kai' },
+        created_at: opts.prCreatedAt ?? OLD_CREATED_AT,
+      },
+      repository: { name: repoName, full_name: `Slaanesh233-sandbox/${repoName}` },
+    } as unknown as HandleEventCtx['event']['payload'],
+    repo: { owner: 'Slaanesh233-sandbox', repo: repoName },
+  };
+}
+
+interface MergedOpts {
+  mergerLogin?: string;
+  reviewers?: string[];
+  prCreatedAt?: string;
+  repoName?: string;
+  senderType?: string;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function mergedEvent(opts: MergedOpts = {}): HandleEventCtx['event'] {
+  const repoName = opts.repoName ?? 'sandbox-repo-a';
+  const prNumber = 42;
+  const mergerLogin = opts.mergerLogin ?? 'merger';
+  return {
+    name: 'pull_request' as const,
+    payload: {
+      action: 'closed',
+      sender: { login: mergerLogin, type: opts.senderType ?? 'User' },
+      pull_request: {
+        number: prNumber,
+        html_url: `https://github.com/Slaanesh233-sandbox/${repoName}/pull/${prNumber}`,
+        user: { login: 'kai' },
+        created_at: opts.prCreatedAt ?? OLD_CREATED_AT,
+        merged: true,
+        merged_by: { login: mergerLogin },
+        requested_reviewers: (opts.reviewers ?? []).map((login) => ({ login })),
+      },
+      repository: { name: repoName, full_name: `Slaanesh233-sandbox/${repoName}` },
+    } as unknown as HandleEventCtx['event']['payload'],
+    repo: { owner: 'Slaanesh233-sandbox', repo: repoName },
+  };
+}
+
+interface CloseWithoutMergeOpts {
+  closerLogin?: string;
+  reviewers?: string[];
+  prCreatedAt?: string;
+  repoName?: string;
+  senderType?: string;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function closedWithoutMergeEvent(opts: CloseWithoutMergeOpts = {}): HandleEventCtx['event'] {
+  const repoName = opts.repoName ?? 'sandbox-repo-a';
+  const prNumber = 42;
+  const closerLogin = opts.closerLogin ?? 'closer';
+  return {
+    name: 'pull_request' as const,
+    payload: {
+      action: 'closed',
+      sender: { login: closerLogin, type: opts.senderType ?? 'User' },
+      pull_request: {
+        number: prNumber,
+        html_url: `https://github.com/Slaanesh233-sandbox/${repoName}/pull/${prNumber}`,
+        user: { login: 'kai' },
+        created_at: opts.prCreatedAt ?? OLD_CREATED_AT,
+        merged: false,
+        merged_by: null,
+        requested_reviewers: (opts.reviewers ?? []).map((login) => ({ login })),
+      },
+      repository: { name: repoName, full_name: `Slaanesh233-sandbox/${repoName}` },
+    } as unknown as HandleEventCtx['event']['payload'],
     repo: { owner: 'Slaanesh233-sandbox', repo: repoName },
   };
 }
@@ -281,5 +555,119 @@ describe('handleEvent — Slack failure', () => {
     expect(spies.postMessage).toHaveBeenCalledTimes(1);
     expect(spies.pullsUpdate).not.toHaveBeenCalled(); // no marker write without ts
     expect(spies.setFailed).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===== Phase 3 — FLT-02 silent marker ====================================
+
+describe('handleEvent — FLT-02 silent marker (Phase 3)', () => {
+  it('skips clean (zero Slack calls) when liveBody contains the silent marker — open event', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: 'PR description\n\n<!-- pr-bot:silent -->\n',
+    });
+    await handleEvent(deps, { event: openedEvent({}) });
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.pullsUpdate).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).not.toHaveBeenCalled();
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/silent/i));
+  });
+
+  it('skips clean (zero Slack calls) when liveBody contains the silent marker — review-submitted event', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: `PR description\n\n<!-- pr-bot:silent -->\n<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`,
+    });
+    await handleEvent(deps, { event: reviewSubmittedEvent({ state: 'approved' }) });
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).not.toHaveBeenCalled();
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/FLT-02|silent/i));
+  });
+
+  it('FLT-02 ordering: bot sender skipped FIRST (FLT-01 runs before silent-marker check)', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: 'PR description\n<!-- pr-bot:silent -->',
+    });
+    await handleEvent(deps, {
+      event: reviewSubmittedEvent({
+        senderLogin: 'github-actions[bot]',
+        senderType: 'Bot',
+        state: 'approved',
+      }),
+    });
+    // FLT-01 short-circuits — pullsGet never called.
+    expect(spies.pullsGet).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/bot/i));
+  });
+
+  it('does NOT mistake the thread_ts marker for a silent marker', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`,
+    });
+    await handleEvent(deps, { event: reviewSubmittedEvent({ state: 'approved' }) });
+    // FLT-02 must NOT fire — proceeds past the silent-marker check.
+    expect(spies.info).not.toHaveBeenCalledWith(expect.stringMatching(/silent/i));
+  });
+});
+
+// ===== Phase 3 — THRD-07 marker-missing graceful skip ====================
+
+describe('handleEvent — THRD-07 marker-missing graceful skip (Phase 3)', () => {
+  it('warns + skips when marker absent AND PR opened ≥60s ago', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: 'PR description without any marker' });
+    const event = reviewSubmittedEvent({ state: 'approved', prCreatedAt: OLD_CREATED_AT });
+    await handleEvent(deps, { event });
+    expect(spies.warning).toHaveBeenCalledTimes(1);
+    const warningMsg = spies.warning.mock.calls[0]![0] as string;
+    expect(warningMsg).toMatch(/PR #/);
+    expect(warningMsg).toMatch(/marker|thread/i);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.chatUpdate).not.toHaveBeenCalled();
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+  });
+
+  it('info-logs (race-window) + skips when marker absent AND PR opened <60s ago', async () => {
+    const { deps, spies } = makeMockDeps({ pullsGetBody: 'PR description without any marker' });
+    const event = reviewSubmittedEvent({ state: 'approved', prCreatedAt: RECENT_CREATED_AT });
+    await handleEvent(deps, { event });
+    expect(spies.warning).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/race-window/));
+    expect(spies.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('uses created_at NOT updated_at as the anchor (Pitfall 11)', async () => {
+    // created_at = 2 minutes ago → THRD-07 SHOULD warn. The handler must read
+    // created_at; if it accidentally read updated_at it would race-window-info instead.
+    const { deps, spies } = makeMockDeps({ pullsGetBody: 'no marker' });
+    const event = reviewSubmittedEvent({
+      state: 'approved',
+      prCreatedAt: new Date(Date.now() - 120_000).toISOString(),
+    });
+    await handleEvent(deps, { event });
+    expect(spies.warning).toHaveBeenCalledTimes(1);
+    expect(spies.info).not.toHaveBeenCalledWith(expect.stringMatching(/race-window/));
+  });
+
+  it('Pitfall 8 — pulls.get is called ONCE per event (FLT-02 + THRD-07 share liveBody)', async () => {
+    const { deps, spies } = makeMockDeps({
+      pullsGetBody: `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`,
+    });
+    await handleEvent(deps, { event: reviewSubmittedEvent({ state: 'approved' }) });
+    expect(spies.pullsGet).toHaveBeenCalledTimes(1); // CRITICAL: not 2
+  });
+});
+
+// ===== Phase 3 — Phase-2 open-class regression ===========================
+
+describe('handleEvent — Phase-2 open-class regression (no behavioral change)', () => {
+  it('happy path still posts ONE message and PATCHes ONE body', async () => {
+    const { deps, spies } = makeMockDeps();
+    await handleEvent(deps, { event: openedEvent({}) });
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.pullsGet).toHaveBeenCalledTimes(1);
+    expect(spies.pullsUpdate).toHaveBeenCalledTimes(1);
+    expect(spies.chatUpdate).not.toHaveBeenCalled();
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
+    expect(spies.setFailed).not.toHaveBeenCalled();
   });
 });
