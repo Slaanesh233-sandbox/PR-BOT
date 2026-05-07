@@ -95,6 +95,7 @@ describe('types — RoutedEvent discriminator coverage', () => {
           prHtmlUrl: '',
           prAuthorLogin: '',
           prCreatedAt: '',
+          reviewerLogins: [],
         },
       },
     ] satisfies readonly RoutedEvent[];
@@ -168,6 +169,7 @@ describe('types — FLT-06 forbidden-fields allowlist (compile-time)', () => {
       prHtmlUrl: '',
       prAuthorLogin: 'kai',
       prCreatedAt: '2026-01-01T00:00:00Z',
+      reviewerLogins: [],
     };
     // @ts-expect-error — title field forbidden (FLT-06)
     void a.title;

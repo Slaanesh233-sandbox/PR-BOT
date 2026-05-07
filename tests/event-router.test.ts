@@ -140,7 +140,10 @@ describe('classify — pull_request_review submitted (THRD-01)', () => {
     });
   }
   it("state=commented → skip with reason 'commented-review-redundant-with-review-comment-events' (Change A 2026-05-07)", () => {
-    const r = classify({ name: 'pull_request_review', payload: reviewPayload({ state: 'commented' }) });
+    const r = classify({
+      name: 'pull_request_review',
+      payload: reviewPayload({ state: 'commented' }),
+    });
     expect(r).toEqual({
       kind: 'skip',
       reason: 'commented-review-redundant-with-review-comment-events',

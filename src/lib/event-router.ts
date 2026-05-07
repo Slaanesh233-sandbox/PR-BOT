@@ -195,12 +195,20 @@ function classifyPullRequest(p: PrPayload): RoutedEvent {
   }
 
   if (p.action === 'reopened') {
+    // Change B 2026-05-07 — populate reviewerLogins from the cumulative
+    // requested_reviewers list so handleReopen can re-render the OPEN-04 cc
+    // clause inside the un-struck root rebuild. Same source/order-preserving
+    // filter pattern as the closed/merged branches.
+    const reviewerLogins: readonly GitHubLogin[] = (p.pull_request?.requested_reviewers ?? [])
+      .map((r) => r.login)
+      .filter((l): l is string => typeof l === 'string');
     const summary: ReopenSummary = {
       reopenerLogin: p.sender?.login ?? '',
       prNumber,
       prHtmlUrl,
       prAuthorLogin,
       prCreatedAt,
+      reviewerLogins,
     };
     return { kind: 'reopened', summary };
   }

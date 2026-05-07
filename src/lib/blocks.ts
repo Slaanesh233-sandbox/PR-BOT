@@ -71,13 +71,25 @@ export interface BuildRootArgs {
 /**
  * Build the OPEN-04 root message Block Kit payload.
  *
- * Result shape: `{ blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] }`.
+ * Result shape: `{ blocks, text }`. The `text` field is the un-wrapped mrkdwn-link
+ * form of the section text — same composition as `buildStrikethroughRoot.text` but
+ * WITHOUT the surrounding tildes. Both fields run through `capSectionText` so
+ * FLT-04's 3000-char ceiling is enforced on either consumer (blocks-only or
+ * blocks+text).
+ *
+ * Returning text alongside blocks is required by Change B 2026-05-07's handleReopen
+ * dispatcher, which calls `chat.update({ ..., text, blocks })` (Pitfall 2: passing
+ * text without blocks REPLACES the previous blocks with plain text). handleOpen
+ * still uses only `.blocks` and is unaffected by the widening.
  *
  * Note that no PR-title or branch-ref input is accepted by this function — see FLT-06(a).
  * The only fields that can reach Slack via this builder are `repoShortName`, `repoUrl`,
  * `prHtmlUrl`, and the `text` strings on the supplied `ResolvedMention`s.
  */
-export function buildRootMessage(args: BuildRootArgs): { blocks: readonly unknown[] } {
+export function buildRootMessage(args: BuildRootArgs): {
+  readonly blocks: readonly unknown[];
+  readonly text: string;
+} {
   const repoLink = `<${args.repoUrl}|${args.repoShortName}>`;
   const prLink = `<${args.prHtmlUrl}|pull request>`;
   let raw = `${repoLink}: ${args.authorMention.text} has published a ${prLink}.`;
@@ -85,8 +97,10 @@ export function buildRootMessage(args: BuildRootArgs): { blocks: readonly unknow
     const cc = args.reviewerMentions.map((m) => m.text).join(' ');
     raw += ` cc ${cc}`;
   }
+  const capped = capSectionText(raw);
   return {
-    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capSectionText(raw) } }],
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capped } }],
+    text: capped,
   };
 }
 

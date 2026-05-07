@@ -141,6 +141,11 @@ export interface ReopenSummary {
   readonly prHtmlUrl: string;
   readonly prAuthorLogin: GitHubLogin;
   readonly prCreatedAt: string;
+  // Cumulative reviewer logins at event time; preserves order. Used by Change B
+  // 2026-05-07's handleReopen to re-render the OPEN-04 cc clause inside the
+  // un-struck root rebuild — parallel to TerminalSummary.reviewerLogins's role
+  // in handleTerminal's strikethrough rebuild.
+  readonly reviewerLogins: readonly GitHubLogin[];
 }
 
 // Event-router output (consumed by event-router.ts in Plan 03b): a description of what to do,
