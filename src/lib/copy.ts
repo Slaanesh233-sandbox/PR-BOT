@@ -40,8 +40,11 @@ import type { ResolvedMention } from './types.js';
 export const REVIEW_REACTION = {
   approved: 'white_check_mark',
   changes_requested: 'warning',
-  // 'commented' key intentionally absent — STAT-01: consumers check key existence
-  // before calling reactions.add for a comment-only review verdict.
+  // 'commented' key absent because router-skip short-circuits commented-state reviews
+  // upstream (Change A 2026-05-07; see event-router.ts). Only approved + changes_requested
+  // events reach the dispatcher's REVIEW_REACTION[s.state] lookup. The dispatcher's
+  // defensive 'if reaction !== undefined' check is now structurally unreachable but kept
+  // as belt-and-braces.
 } as const;
 
 export const TERMINAL_REACTION = {
@@ -59,9 +62,11 @@ export const TERMINAL_REACTION = {
 // lowercase trailing phrase "the pull request". User-visible strings are exact and
 // must not be paraphrased.
 
-/** THRD-01 review-submitted thread reply (actor-first, locked spec 2026-05-07). */
+/** THRD-01 review-submitted thread reply (actor-first, locked spec 2026-05-07).
+ *  Change A 2026-05-07: 'commented' state is router-skipped upstream; this
+ *  function only handles the two remaining verdicts (TS exhaustive — no default). */
 export function formatReviewReply(args: {
-  readonly state: 'approved' | 'changes_requested' | 'commented';
+  readonly state: 'approved' | 'changes_requested';
   readonly reviewerMention: ResolvedMention;
 }): string {
   const m = args.reviewerMention.text;
@@ -70,8 +75,6 @@ export function formatReviewReply(args: {
       return `:white_check_mark: ${m} approved the pull request`;
     case 'changes_requested':
       return `:warning: ${m} requested changes on the pull request`;
-    case 'commented':
-      return `:speech_balloon: ${m} commented on the pull request`;
   }
 }
 

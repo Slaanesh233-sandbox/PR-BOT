@@ -219,6 +219,16 @@ function classifyPullRequestReview(p: ReviewPayload): RoutedEvent {
   if (state !== 'approved' && state !== 'changes_requested' && state !== 'commented') {
     return { kind: 'skip', reason: `review-state-unrecognized:${state}` };
   }
+  // Change A 2026-05-07 — drop the commented-review handler. GitHub fires both a
+  // pull_request_review:submitted (state='commented') AND a pull_request_review_comment:created
+  // event for a single inline review-comment user action; the bot would post twice
+  // to Slack ("commented on the pull request" + "published 1 inline comment on the pull request").
+  // The implicit-review wrapper is the noisy duplicate; the inline-comment event carries
+  // the actual signal. Standalone summary-only reviews (no inline comments) also fire
+  // this state but are low-frequency in practice — accepted trade-off per D-22.
+  if (state === 'commented') {
+    return { kind: 'skip', reason: 'commented-review-redundant-with-review-comment-events' };
+  }
   const summary: ReviewSummary = {
     state,
     reviewerLogin: p.review?.user?.login ?? '',

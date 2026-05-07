@@ -87,7 +87,9 @@ export interface PrSummary {
 // root line, which mentions the AUTHOR, not the merger/closer).
 
 export interface ReviewSummary {
-  readonly state: 'approved' | 'changes_requested' | 'commented';
+  // Change A 2026-05-07 — 'commented' state is router-skipped (see event-router.ts
+  // classifyPullRequestReview); only approved/changes_requested reach this Summary.
+  readonly state: 'approved' | 'changes_requested';
   readonly reviewerLogin: GitHubLogin;
   readonly prNumber: number;
   readonly prHtmlUrl: string;

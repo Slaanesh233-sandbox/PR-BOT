@@ -396,7 +396,11 @@ async function handleThreadKind(
         prNumber,
       );
       if (!postOk) return;
-      // STAT-01: only approved + changes_requested produce a reaction; commented does NOT.
+      // STAT-01 + Change A 2026-05-07: only approved + changes_requested events reach this
+      // dispatcher (commented-state events are router-skipped upstream — see event-router.ts).
+      // The 'if (reaction !== undefined)' guard below is now structurally unreachable for
+      // the two remaining states (REVIEW_REACTION has both keys defined) but kept as
+      // defense-in-depth.
       const reaction = REVIEW_REACTION[s.state as keyof typeof REVIEW_REACTION];
       if (reaction !== undefined) {
         await addReaction(deps, channel, threadTs, reaction, prNumber);
