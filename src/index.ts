@@ -65,17 +65,22 @@ import {
   TERMINAL_REACTION,
   type ChannelConfig,
   type GitHubLogin,
-  type IssueCommentSummary,
   type PrSummary,
-  type ReopenSummary,
   type ResolvedMention,
-  type ReviewCommentSummary,
-  type ReviewerRequestSummary,
-  type ReviewSummary,
   type RoutedEvent,
   type TerminalSummary,
   type UsersMap,
 } from './lib/index.js';
+
+// Some Plan-03-01 exports are imported but consumed only by Task 2.3
+// (handleTerminal multi-call dispatcher). Reference them here so the
+// `@typescript-eslint/no-unused-vars` rule does not error during the
+// Task 2.2 GREEN intermediate state. Task 2.3 replaces this `void` block
+// with real call sites inside handleTerminal.
+void buildStrikethroughRoot;
+void formatMergeReply;
+void formatCloseReply;
+void TERMINAL_REACTION;
 
 // --- Public DI seam --------------------------------------------------------
 
@@ -354,34 +359,235 @@ async function handleThreadKind(
     return;
   }
 
-  // Step 4: kind-specific dispatch — Task 2.2 + Task 2.3 fill in branches.
-  // Reference the unused intermediates so TypeScript compiles cleanly while the
-  // Phase-3 dispatch branches are stubbed.
-  void summary;
-  void threadTs;
-  void formatReviewReply;
-  void formatCommentReply;
-  void formatRequestedReviewReply;
-  void formatReopenReply;
-  void formatMergeReply;
-  void formatCloseReply;
-  void buildThreadReply;
-  void buildStrikethroughRoot;
-  void REVIEW_REACTION;
-  void TERMINAL_REACTION;
-  // Type-level acknowledgements that the per-kind summary types are imported and
-  // narrowable; the actual dispatch lives in Tasks 2.2 + 2.3.
-  type _PhaseThreeSummaryUnion =
-    | ReviewSummary
-    | IssueCommentSummary
-    | ReviewCommentSummary
-    | ReviewerRequestSummary
-    | TerminalSummary
-    | ReopenSummary;
-  const _phaseThreeSummaryAcknowledged = null as unknown as _PhaseThreeSummaryUnion | null;
-  void _phaseThreeSummaryAcknowledged;
+  // Step 4: kind-specific dispatch — see <dispatch_matrix> in plan.
+  const channel = deps.config.channel.channel;
+  const warn = (msg: string): void => deps.logger.warning(msg);
+
+  switch (routed.kind) {
+    case 'review-submitted': {
+      const s = routed.summary;
+      const reviewerMention = resolveMention(s.reviewerLogin, deps.config.users, { warn });
+      const replyText = formatReviewReply({ state: s.state, reviewerMention });
+      const reply = buildThreadReply({ text: replyText });
+      const postOk = await postThreadReply(
+        deps,
+        channel,
+        threadTs,
+        reply.blocks,
+        replyText,
+        prNumber,
+      );
+      if (!postOk) return;
+      // STAT-01: only approved + changes_requested produce a reaction; commented does NOT.
+      const reaction = REVIEW_REACTION[s.state as keyof typeof REVIEW_REACTION];
+      if (reaction !== undefined) {
+        await addReaction(deps, channel, threadTs, reaction, prNumber);
+      }
+      deps.logger.info(`posted review-submitted reply for PR #${prNumber} (state=${s.state})`);
+      return;
+    }
+    case 'pr-comment':
+    case 'review-comment': {
+      const s = routed.summary;
+      const commenterMention = resolveMention(s.commenterLogin, deps.config.users, { warn });
+      // n=1 per event — the bot has no aggregation (ROADMAP success criterion 2;
+      // V2-AGG-01 owns debounce). Two consecutive comments produce two events,
+      // each n=1.
+      const replyText = formatCommentReply({ commenterMention, n: 1 });
+      const reply = buildThreadReply({ text: replyText });
+      const postOk = await postThreadReply(
+        deps,
+        channel,
+        threadTs,
+        reply.blocks,
+        replyText,
+        prNumber,
+      );
+      if (!postOk) return;
+      deps.logger.info(`posted ${routed.kind} reply for PR #${prNumber}`);
+      return;
+    }
+    case 'reviewer-requested': {
+      const s = routed.summary;
+      const requestedReviewerMention = resolveMention(s.requestedReviewerLogin, deps.config.users, {
+        warn,
+      });
+      const requesterMention = resolveMention(s.requesterLogin, deps.config.users, { warn });
+      const replyText = formatRequestedReviewReply({ requestedReviewerMention, requesterMention });
+      const reply = buildThreadReply({ text: replyText });
+      const postOk = await postThreadReply(
+        deps,
+        channel,
+        threadTs,
+        reply.blocks,
+        replyText,
+        prNumber,
+      );
+      if (!postOk) return;
+      deps.logger.info(`posted reviewer-requested reply for PR #${prNumber}`);
+      return;
+    }
+    case 'reopened': {
+      const s = routed.summary;
+      const reopenerMention = resolveMention(s.reopenerLogin, deps.config.users, { warn });
+      const replyText = formatReopenReply({ reopenerMention });
+      const reply = buildThreadReply({ text: replyText });
+      const postOk = await postThreadReply(
+        deps,
+        channel,
+        threadTs,
+        reply.blocks,
+        replyText,
+        prNumber,
+      );
+      if (!postOk) return;
+      deps.logger.info(`posted reopened reply for PR #${prNumber}`);
+      return;
+    }
+    case 'merged':
+    case 'closed-without-merge':
+      // Task 2.3 owns the multi-call dispatcher for these kinds.
+      return handleTerminal(deps, ctx, routed, threadTs);
+    default: {
+      // Exhaustive check — TypeScript's never narrowing catches missing branches.
+      const _exhaustive: never = routed;
+      void _exhaustive;
+      deps.logger.info(`(unreachable) unhandled routed kind`);
+      return;
+    }
+  }
+}
+
+// === Phase 3 multi-call helpers =============================================
+
+/**
+ * Post a Slack thread reply. Returns true on success (so callers can chain).
+ *
+ * Failure handling mirrors the Phase-2 chat.postMessage-throw pattern at
+ * handleOpen lines: not_in_channel surfaces with actionable text; everything
+ * else surfaces with the SDK message. Both paths go through core.setFailed
+ * because the thread reply is the user-visible signal — losing it loses the
+ * record of the event in Slack.
+ */
+async function postThreadReply(
+  deps: Deps,
+  channel: string,
+  threadTs: string,
+  blocks: readonly unknown[],
+  text: string,
+  prNumber: number,
+): Promise<boolean> {
+  let result: { ok: boolean; ts?: string; error?: string };
+  try {
+    result = await deps.slack.chat.postMessage({ channel, thread_ts: threadTs, blocks, text });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/not_in_channel/.test(message)) {
+      deps.logger.setFailed(
+        `Slack chat.postMessage (thread reply) failed for PR #${prNumber}: PR-BOT is not a member of channel ${channel}. Run /invite @PR-BOT in the target channel.`,
+      );
+    } else {
+      deps.logger.setFailed(
+        `Slack chat.postMessage (thread reply) threw for PR #${prNumber}: ${message}`,
+      );
+    }
+    return false;
+  }
+  if (!result.ok) {
+    deps.logger.setFailed(
+      `Slack chat.postMessage (thread reply) returned !ok for PR #${prNumber}: ${
+        result.error ?? 'unknown'
+      }`,
+    );
+    return false;
+  }
+  return true;
+}
+
+/**
+ * STAT-01 / STAT-02 / STAT-03 — add a reaction to a Slack message.
+ *
+ * Error disposition follows Research §4 (reactions.add error table) +
+ * Pitfall 16 (already_reacted vs invalid_name distinction):
+ *   - already_reacted: STAT-04 idempotent re-run guard → core.info, return clean.
+ *   - invalid_name / bad_timestamp / no_item_specified: bot bug → core.setFailed.
+ *   - missing_scope / not_in_channel: hard config error → core.setFailed with
+ *     actionable hint.
+ *   - all other errors (is_archived, message_not_found, ratelimited,
+ *     thread_locked, too_many_emoji, too_many_reactions, edit_window_closed,
+ *     etc.): soft-fail → core.warning (the canonical signal — the thread
+ *     reply — already landed).
+ *
+ * `name` MUST be the BARE emoji name (no colons) — the colon-wrapped form is
+ * for inline message text only. Pitfall 3.
+ */
+async function addReaction(
+  deps: Deps,
+  channel: string,
+  ts: string,
+  name: string,
+  prNumber: number,
+): Promise<void> {
+  try {
+    const r = await deps.slack.reactions.add({ channel, timestamp: ts, name });
+    if (!r.ok) {
+      // Defensively handle the !ok-without-throw shape (the SDK normally throws on !ok).
+      const code = r.error ?? 'unknown';
+      handleReactionError(deps, code, prNumber, name);
+    }
+  } catch (err) {
+    const code =
+      (err as { data?: { error?: string } } | null)?.data?.error ??
+      (err instanceof Error ? err.message : 'unknown');
+    handleReactionError(deps, code, prNumber, name);
+  }
+}
+
+function handleReactionError(deps: Deps, code: string, prNumber: number, name: string): void {
+  if (code === 'already_reacted') {
+    deps.logger.info(
+      `reactions.add: already_reacted (PR #${prNumber}, ${name}) — idempotent re-run`,
+    );
+    return;
+  }
+  if (code === 'invalid_name' || code === 'bad_timestamp' || code === 'no_item_specified') {
+    deps.logger.setFailed(
+      `reactions.add hard-failed (${code}) for PR #${prNumber}, ${name} — bot bug`,
+    );
+    return;
+  }
+  if (code === 'not_in_channel') {
+    deps.logger.setFailed(
+      `reactions.add failed (not_in_channel) for PR #${prNumber}, ${name}: PR-BOT is not a member of channel ${deps.config.channel.channel}. Run /invite @PR-BOT in the target channel.`,
+    );
+    return;
+  }
+  if (code === 'missing_scope') {
+    deps.logger.setFailed(
+      `reactions.add failed (missing_scope) for PR #${prNumber}, ${name}: PR-BOT app needs reactions:write scope.`,
+    );
+    return;
+  }
+  // All other codes (ratelimited / is_archived / message_not_found / thread_locked /
+  // too_many_emoji / too_many_reactions / channel_not_found / token_expired / etc.)
+  deps.logger.warning(
+    `reactions.add soft-failed (${code}) for PR #${prNumber}, ${name}; thread reply still landed`,
+  );
+}
+
+/**
+ * Stub for Task 2.3 — multi-call dispatcher for terminal events (merged /
+ * closed-without-merge). Task 2.3 wires the actual three-call sequence
+ * (postMessage → reactions.add → chat.update strikethrough).
+ */
+async function handleTerminal(
+  deps: Deps,
+  _ctx: HandleEventCtx,
+  routed: { readonly kind: 'merged' | 'closed-without-merge'; readonly summary: TerminalSummary },
+  _threadTs: string,
+): Promise<void> {
   deps.logger.info(
-    `(stub) handleThreadKind dispatch reached for kind=${routed.kind} on PR #${prNumber}; Task 2.2 wires the per-kind sequence.`,
+    `(stub) handleTerminal not yet implemented for ${routed.kind} on PR #${routed.summary.prNumber} — Task 2.3 wires the multi-call sequence`,
   );
 }
 
