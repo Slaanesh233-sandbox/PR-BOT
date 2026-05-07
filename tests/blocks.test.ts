@@ -1,16 +1,18 @@
 // Tests for src/lib/blocks.ts — Block Kit builders for the OPEN-04 root message
-// (`<repo>: <@author> has raised a <link|PR>.` plus optional ` cc <reviewer-mentions>`)
-// and thread replies.
+// (`<repoUrl|repo>: <@author> has published a <prHtmlUrl|pull request>.` plus optional
+// ` cc <reviewer-mentions>`) and thread replies.
 //
 // Critical invariants exercised:
 //   - FLT-04: section text caps at MAX_SECTION_TEXT_LENGTH (3000). A 100-name reviewer
 //     list overflows the natural copy and must be truncated rather than rejected.
 //   - FLT-06(a): the OPEN-04 message intentionally does NOT include the PR title or
 //     branch refs. The compile-time evidence is in `BuildRootArgs`'s shape — there is
-//     no `title`, `baseRef`, or `headRef` key to pass in. Tests confirm at runtime
-//     that the message string contains exactly the four fixture inputs and nothing else.
+//     no `title`, `baseRef`, or `headRef` key to pass in. The locked 2026-05-07 spec
+//     adds `repoUrl` (the repo home URL) — a URL field, structurally distinct from
+//     title/branch refs.
 //   - FLT-05: `blocks.ts` consumes `ResolvedMention.text` already-resolved strings; it
-//     never reconstructs Slack mention syntax itself.
+//     never reconstructs Slack mention syntax itself. The new repo-URL link is a plain
+//     `<url|text>` mrkdwn link, not a user mention.
 
 import { describe, expect, it } from 'vitest';
 
@@ -45,6 +47,7 @@ const reviewerFallback: ResolvedMention = {
   login: 'bob',
 };
 
+const REPO_URL = 'https://github.com/x/y';
 const PR_URL = 'https://github.com/x/y/pull/42';
 
 describe('blocks.MAX_SECTION_TEXT_LENGTH', () => {
@@ -57,18 +60,20 @@ describe('blocks.buildRootMessage', () => {
   it('produces the exact OPEN-04 string with no reviewers', () => {
     const result = buildRootMessage({
       repoShortName: 'my-pkg',
+      repoUrl: REPO_URL,
       prHtmlUrl: PR_URL,
       authorMention: authorMapped,
       reviewerMentions: [],
     });
     expect(getSectionText(result)).toBe(
-      'my-pkg: <@U01ABCD2345> has raised a <https://github.com/x/y/pull/42|PR>.',
+      '<https://github.com/x/y|my-pkg>: <@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>.',
     );
   });
 
   it('appends " cc <r1> <r2>" with two reviewers (mixed mapped + fallback texts)', () => {
     const result = buildRootMessage({
       repoShortName: 'my-pkg',
+      repoUrl: REPO_URL,
       prHtmlUrl: PR_URL,
       authorMention: authorMapped,
       reviewerMentions: [reviewerMapped, reviewerFallback],
@@ -76,30 +81,34 @@ describe('blocks.buildRootMessage', () => {
     const text = getSectionText(result);
     // Exact suffix match — order is preserved from the input mention list.
     expect(text).toBe(
-      'my-pkg: <@U01ABCD2345> has raised a <https://github.com/x/y/pull/42|PR>. cc <@U01EFGH6789> @bob',
+      '<https://github.com/x/y|my-pkg>: <@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>. cc <@U01EFGH6789> @bob',
     );
   });
 
-  it('renders the URL inside `<URL|PR>` so the link word is exactly "PR"', () => {
+  it('renders the PR URL inside `<URL|pull request>` so the link text is exactly "pull request" (locked spec 2026-05-07)', () => {
     const result = buildRootMessage({
       repoShortName: 'my-pkg',
+      repoUrl: REPO_URL,
       prHtmlUrl: PR_URL,
       authorMention: authorMapped,
       reviewerMentions: [],
     });
-    // Critical OPEN-04 contract: the only clickable text in the message is the word "PR".
-    expect(getSectionText(result)).toContain('|PR>');
+    // Critical OPEN-04 contract (refreshed 2026-05-07): the PR link text is "pull request",
+    // and the repo opens as a `<repoUrl|repoShortName>:` mrkdwn link.
+    expect(getSectionText(result)).toContain('|pull request>');
+    expect(getSectionText(result)).toContain('<https://github.com/x/y|my-pkg>:');
   });
 
   it('section text never includes any PR title or branch ref content', () => {
     // FLT-06(a): BuildRootArgs has no `title`/`baseRef`/`headRef` keys at compile time
     // (verified by the plan-level grep gate against blocks.ts source). At runtime, the
-    // message can therefore only contain: repoShortName, prHtmlUrl, mention texts, and
-    // the static OPEN-04 phrase. We confirm by passing fixtures that have NO overlap
-    // with words like "feat:", "main", "develop", "fix-bug" and asserting the result
-    // doesn't contain them.
+    // message can therefore only contain: repoShortName, repoUrl, prHtmlUrl, mention
+    // texts, and the static OPEN-04 phrase. We confirm by passing fixtures that have
+    // NO overlap with words like "feat:", "main", "develop", "fix-bug" and asserting
+    // the result doesn't contain them.
     const result = buildRootMessage({
       repoShortName: 'my-pkg',
+      repoUrl: REPO_URL,
       prHtmlUrl: PR_URL,
       authorMention: authorMapped,
       reviewerMentions: [],
@@ -119,6 +128,7 @@ describe('blocks.buildRootMessage', () => {
     }));
     const result = buildRootMessage({
       repoShortName: 'my-pkg',
+      repoUrl: REPO_URL,
       prHtmlUrl: PR_URL,
       authorMention: authorMapped,
       reviewerMentions,
@@ -151,12 +161,13 @@ describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', ()
   it('no reviewers → wraps the full OPEN-04-shaped line in single tildes; returns blocks AND text', () => {
     const r = buildStrikethroughRoot({
       repoShortName: 'sandbox-repo-a',
+      repoUrl: 'https://github.com/o/r',
       prHtmlUrl: 'https://github.com/o/r/pull/4',
       authorMention: author('<@UAUTH>'),
       reviewerMentions: [],
     });
     expect(r.text).toBe(
-      '~sandbox-repo-a: <@UAUTH> has raised a <https://github.com/o/r/pull/4|PR>.~',
+      '~<https://github.com/o/r|sandbox-repo-a>: <@UAUTH> has published a <https://github.com/o/r/pull/4|pull request>.~',
     );
     expect(r.blocks).toHaveLength(1);
     const block = r.blocks[0] as { type: string; text: { type: string; text: string } };
@@ -168,12 +179,13 @@ describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', ()
   it('with reviewers → strikethrough wraps cc clause too', () => {
     const r = buildStrikethroughRoot({
       repoShortName: 'sandbox-repo-a',
+      repoUrl: 'https://github.com/o/r',
       prHtmlUrl: 'https://github.com/o/r/pull/4',
       authorMention: author('<@UAUTH>'),
       reviewerMentions: [reviewer('<@UR1>'), reviewer('<@UR2>')],
     });
     expect(r.text).toBe(
-      '~sandbox-repo-a: <@UAUTH> has raised a <https://github.com/o/r/pull/4|PR>. cc <@UR1> <@UR2>~',
+      '~<https://github.com/o/r|sandbox-repo-a>: <@UAUTH> has published a <https://github.com/o/r/pull/4|pull request>. cc <@UR1> <@UR2>~',
     );
   });
 
@@ -183,6 +195,7 @@ describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', ()
     );
     const r = buildStrikethroughRoot({
       repoShortName: 'sandbox-repo-a',
+      repoUrl: 'https://github.com/o/r',
       prHtmlUrl: 'https://github.com/o/r/pull/4',
       authorMention: author('<@UAUTH>'),
       reviewerMentions: reviewers,
@@ -196,6 +209,7 @@ describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', ()
     const longRepo = 'x'.repeat(4000);
     const r = buildStrikethroughRoot({
       repoShortName: longRepo,
+      repoUrl: 'https://github.com/o/r',
       prHtmlUrl: 'https://github.com/o/r/pull/4',
       authorMention: author('<@UAUTH>'),
       reviewerMentions: [],
@@ -215,6 +229,7 @@ describe('buildRootMessage — FLT-04 100-reviewer happy path stays under cap (R
     );
     const r = buildRootMessage({
       repoShortName: 'sandbox-repo-a',
+      repoUrl: 'https://github.com/o/r',
       prHtmlUrl: 'https://github.com/o/r/pull/4',
       authorMention: author('<@UAUTH>'),
       reviewerMentions: reviewers,
