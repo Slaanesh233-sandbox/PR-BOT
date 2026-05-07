@@ -60428,8 +60428,11 @@ function isBotActor(actor) {
 const REVIEW_REACTION = {
     approved: 'white_check_mark',
     changes_requested: 'warning',
-    // 'commented' key intentionally absent — STAT-01: consumers check key existence
-    // before calling reactions.add for a comment-only review verdict.
+    // 'commented' key absent because router-skip short-circuits commented-state reviews
+    // upstream (Change A 2026-05-07; see event-router.ts). Only approved + changes_requested
+    // events reach the dispatcher's REVIEW_REACTION[s.state] lookup. The dispatcher's
+    // defensive 'if reaction !== undefined' check is now structurally unreachable but kept
+    // as belt-and-braces.
 };
 const TERMINAL_REACTION = {
     merged: 'tada',
@@ -60444,7 +60447,9 @@ const TERMINAL_REACTION = {
 // Locked-spec 2026-05-07: every formatter uses the actor-first pattern with the
 // lowercase trailing phrase "the pull request". User-visible strings are exact and
 // must not be paraphrased.
-/** THRD-01 review-submitted thread reply (actor-first, locked spec 2026-05-07). */
+/** THRD-01 review-submitted thread reply (actor-first, locked spec 2026-05-07).
+ *  Change A 2026-05-07: 'commented' state is router-skipped upstream; this
+ *  function only handles the two remaining verdicts (TS exhaustive — no default). */
 function formatReviewReply(args) {
     const m = args.reviewerMention.text;
     switch (args.state) {
@@ -60452,8 +60457,6 @@ function formatReviewReply(args) {
             return `:white_check_mark: ${m} approved the pull request`;
         case 'changes_requested':
             return `:warning: ${m} requested changes on the pull request`;
-        case 'commented':
-            return `:speech_balloon: ${m} commented on the pull request`;
     }
 }
 /**
@@ -60562,7 +60565,16 @@ function capSectionText(raw) {
 /**
  * Build the OPEN-04 root message Block Kit payload.
  *
- * Result shape: `{ blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }] }`.
+ * Result shape: `{ blocks, text }`. The `text` field is the un-wrapped mrkdwn-link
+ * form of the section text — same composition as `buildStrikethroughRoot.text` but
+ * WITHOUT the surrounding tildes. Both fields run through `capSectionText` so
+ * FLT-04's 3000-char ceiling is enforced on either consumer (blocks-only or
+ * blocks+text).
+ *
+ * Returning text alongside blocks is required by Change B 2026-05-07's handleReopen
+ * dispatcher, which calls `chat.update({ ..., text, blocks })` (Pitfall 2: passing
+ * text without blocks REPLACES the previous blocks with plain text). handleOpen
+ * still uses only `.blocks` and is unaffected by the widening.
  *
  * Note that no PR-title or branch-ref input is accepted by this function — see FLT-06(a).
  * The only fields that can reach Slack via this builder are `repoShortName`, `repoUrl`,
@@ -60576,8 +60588,10 @@ function buildRootMessage(args) {
         const cc = args.reviewerMentions.map((m) => m.text).join(' ');
         raw += ` cc ${cc}`;
     }
+    const capped = capSectionText(raw);
     return {
-        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capSectionText(raw) } }],
+        blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capped } }],
+        text: capped,
     };
 }
 /**
@@ -60734,12 +60748,20 @@ function classifyPullRequest(p) {
         return { kind: 'closed-without-merge', summary };
     }
     if (p.action === 'reopened') {
+        // Change B 2026-05-07 — populate reviewerLogins from the cumulative
+        // requested_reviewers list so handleReopen can re-render the OPEN-04 cc
+        // clause inside the un-struck root rebuild. Same source/order-preserving
+        // filter pattern as the closed/merged branches.
+        const reviewerLogins = (p.pull_request?.requested_reviewers ?? [])
+            .map((r) => r.login)
+            .filter((l) => typeof l === 'string');
         const summary = {
             reopenerLogin: p.sender?.login ?? '',
             prNumber,
             prHtmlUrl,
             prAuthorLogin,
             prCreatedAt,
+            reviewerLogins,
         };
         return { kind: 'reopened', summary };
     }
@@ -60755,6 +60777,16 @@ function classifyPullRequestReview(p) {
     }
     if (state !== 'approved' && state !== 'changes_requested' && state !== 'commented') {
         return { kind: 'skip', reason: `review-state-unrecognized:${state}` };
+    }
+    // Change A 2026-05-07 — drop the commented-review handler. GitHub fires both a
+    // pull_request_review:submitted (state='commented') AND a pull_request_review_comment:created
+    // event for a single inline review-comment user action; the bot would post twice
+    // to Slack ("commented on the pull request" + "published 1 inline comment on the pull request").
+    // The implicit-review wrapper is the noisy duplicate; the inline-comment event carries
+    // the actual signal. Standalone summary-only reviews (no inline comments) also fire
+    // this state but are low-frequency in practice — accepted trade-off per D-22.
+    if (state === 'commented') {
+        return { kind: 'skip', reason: 'commented-review-redundant-with-review-comment-events' };
     }
     const summary = {
         state,
@@ -60979,6 +61011,16 @@ function loadChannelConfig(yamlText) {
 //     only one would replace the other.
 //   - Pitfall 9 (Plan 03-02): chat.update never receives thread_ts; that argument
 //     is only valid on chat.postMessage thread replies.
+//
+// Phase 3 UX fix Change B 2026-05-07: pull_request: reopened becomes the THIRD
+// multi-call event class. handleReopen mirrors handleTerminal's shape (4 sequential
+// Slack calls: thread reply LOUD-fail, then reactions.remove ×2 soft-fail, then
+// chat.update soft-fail) but inverts the strikethrough — re-renders the live root
+// via buildRootMessage (NOT buildStrikethroughRoot). Both terminal reactions
+// (no_entry_sign AND tada) are removed because the bot does not track which
+// terminal reaction was previously added; reactions.remove tolerates the
+// no_reaction code (the unique-to-remove parallel of add's already_reacted).
+// See removeReaction + handleReactionRemovalError for the error tier mapping.
 
 
 
@@ -61151,7 +61193,11 @@ async function handleThreadKind(deps, ctx, routed) {
             const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
             if (!postOk)
                 return;
-            // STAT-01: only approved + changes_requested produce a reaction; commented does NOT.
+            // STAT-01 + Change A 2026-05-07: only approved + changes_requested events reach this
+            // dispatcher (commented-state events are router-skipped upstream — see event-router.ts).
+            // The 'if (reaction !== undefined)' guard below is now structurally unreachable for
+            // the two remaining states (REVIEW_REACTION has both keys defined) but kept as
+            // defense-in-depth.
             const reaction = REVIEW_REACTION[s.state];
             if (reaction !== undefined) {
                 await addReaction(deps, channel, threadTs, reaction, prNumber);
@@ -61206,17 +61252,10 @@ async function handleThreadKind(deps, ctx, routed) {
             deps.logger.info(`posted reviewer-requested reply for PR #${prNumber}`);
             return;
         }
-        case 'reopened': {
-            const s = routed.summary;
-            const reopenerMention = resolve(s.reopenerLogin, deps.config.users, { warn });
-            const replyText = formatReopenReply({ reopenerMention });
-            const reply = buildThreadReply({ text: replyText });
-            const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
-            if (!postOk)
-                return;
-            deps.logger.info(`posted reopened reply for PR #${prNumber}`);
-            return;
-        }
+        case 'reopened':
+            // Change B 2026-05-07 — multi-call un-strike dispatcher (third multi-call event class
+            // alongside merge + close-without-merge). See handleReopen below.
+            return handleReopen(deps, ctx, routed, threadTs);
         case 'merged':
         case 'closed-without-merge':
             // Task 2.3 owns the multi-call dispatcher for these kinds.
@@ -61387,6 +61426,122 @@ async function handleTerminal(deps, ctx, routed, threadTs) {
     }
     deps.logger.info(`posted ${routed.kind} thread + reaction + strikethrough for PR #${prNumber}`);
 }
+/**
+ * Change B 2026-05-07 — multi-call un-strike dispatcher for pull_request: reopened.
+ *
+ * Mirrors handleTerminal's shape (4 sequential Slack calls) but inverts the
+ * strikethrough: re-renders the live root via buildRootMessage instead of
+ * buildStrikethroughRoot, so the channel-glance signal accurately reflects the
+ * PR's reopened state.
+ *
+ * Calls in order:
+ *   1. chat.postMessage thread reply (LOUD-fail)
+ *   2. reactions.remove on root with name 'no_entry_sign' (soft-fail; tolerates
+ *      no_reaction, message_not_found, ratelimited, etc. via warning)
+ *   3. reactions.remove on root with name 'tada' (soft-fail; same tier)
+ *   4. chat.update with un-struck root (soft-fail; Pitfall 2 dual args; Pitfall 9
+ *      no thread_ts)
+ *
+ * Both terminal reactions are removed because the bot does not track which one
+ * was previously added — the close path adds 'no_entry_sign' and the merge path
+ * adds 'tada'; reopen handles both. The no_reaction tolerated error covers the
+ * "never had a terminal reaction" case (defensive — the reopened event should
+ * never fire on a never-closed PR, but defense in depth).
+ */
+async function handleReopen(deps, ctx, routed, threadTs) {
+    const channel = deps.config.channel.channel;
+    const summary = routed.summary;
+    const prNumber = summary.prNumber;
+    const warn = (msg) => deps.logger.warning(msg);
+    const reopenerMention = resolve(summary.reopenerLogin, deps.config.users, { warn });
+    const authorMention = resolve(summary.prAuthorLogin, deps.config.users, { warn });
+    const reviewerMentions = resolveAll(summary.reviewerLogins, deps.config.users, { warn });
+    const replyText = formatReopenReply({ reopenerMention });
+    const repoShortName = ctx.event.payload.repository?.name ?? ctx.event.repo.repo;
+    const repoUrl = `https://github.com/${ctx.event.repo.owner}/${ctx.event.repo.repo}`;
+    const root = buildRootMessage({
+        repoShortName,
+        repoUrl,
+        prHtmlUrl: summary.prHtmlUrl,
+        authorMention,
+        reviewerMentions,
+    });
+    // === Call 1: thread reply (LOUD-fail) ===
+    const reply = buildThreadReply({ text: replyText });
+    const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+    if (!postOk)
+        return;
+    // === Call 2 + 3: reactions.remove for both terminal reactions (soft-fail) ===
+    await removeReaction(deps, channel, threadTs, TERMINAL_REACTION.closed, prNumber);
+    await removeReaction(deps, channel, threadTs, TERMINAL_REACTION.merged, prNumber);
+    // === Call 4: chat.update with un-struck root (soft-fail) ===
+    // Pitfall 2: both text AND blocks. Pitfall 9: NO thread_ts.
+    try {
+        const r = await deps.slack.chat.update({
+            channel,
+            ts: threadTs,
+            text: root.text,
+            blocks: root.blocks,
+        });
+        if (!r.ok) {
+            deps.logger.warning(`chat.update (reopen un-strikethrough) returned !ok for PR #${prNumber}: ${r.error ?? 'unknown'}; thread reply + reactions removed already landed`);
+        }
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        deps.logger.warning(`chat.update (reopen un-strikethrough) threw for PR #${prNumber}: ${message}; thread reply + reactions removed already landed`);
+    }
+    deps.logger.info(`posted reopened thread + un-strikethrough + reactions removed for PR #${prNumber}`);
+}
+/**
+ * Change B 2026-05-07 — parallel to addReaction. Removes a reaction from a Slack
+ * message; routes errors through handleReactionRemovalError (paralleling
+ * handleReactionError but with the reactions.remove-specific tier mapping).
+ *
+ * The unique tolerated code is no_reaction (the user/bot hasn't reacted with this
+ * emoji on this message — idempotent re-remove or never-was-present). All other
+ * codes follow the same tier mapping as reactions.add (setFailed for bot bugs,
+ * setFailed-with-hint for config bugs, warning for transient/out-of-band).
+ */
+async function removeReaction(deps, channel, ts, name, prNumber) {
+    try {
+        const r = await deps.slack.reactions.remove({ channel, timestamp: ts, name });
+        if (!r.ok) {
+            const code = r.error ?? 'unknown';
+            handleReactionRemovalError(deps, code, prNumber, name);
+        }
+    }
+    catch (err) {
+        const code = err?.data?.error ??
+            (err instanceof Error ? err.message : 'unknown');
+        handleReactionRemovalError(deps, code, prNumber, name);
+    }
+}
+function handleReactionRemovalError(deps, code, prNumber, name) {
+    if (code === 'no_reaction') {
+        deps.logger.info(`removeReaction: no_reaction (PR #${prNumber}, ${name}) — idempotent re-run / never-present`);
+        return;
+    }
+    if (code === 'message_not_found') {
+        deps.logger.warning(`removeReaction: message_not_found (PR #${prNumber}, ${name}); thread reply still landed`);
+        return;
+    }
+    if (code === 'invalid_name' || code === 'bad_timestamp' || code === 'no_item_specified') {
+        deps.logger.setFailed(`removeReaction hard-failed (${code}) for PR #${prNumber}, ${name} — bot bug`);
+        return;
+    }
+    if (code === 'not_in_channel') {
+        deps.logger.setFailed(`removeReaction failed (not_in_channel) for PR #${prNumber}, ${name}: PR-BOT is not a member of channel ${deps.config.channel.channel}. Run /invite @PR-BOT in the target channel.`);
+        return;
+    }
+    if (code === 'missing_scope') {
+        deps.logger.setFailed(`removeReaction failed (missing_scope) for PR #${prNumber}, ${name}: PR-BOT app needs reactions:write scope.`);
+        return;
+    }
+    // All other codes (ratelimited / is_archived / thread_locked / channel_not_found /
+    // token_expired / etc.) — soft-fail so the dispatcher continues to chat.update.
+    deps.logger.warning(`removeReaction soft-failed (${code}) for PR #${prNumber}, ${name}; thread reply still landed`);
+}
 // --- PATCH retry helper (OPEN-05; Pitfall 7) -------------------------------
 async function patchWithRetry(deps, owner, repo, pull_number, body) {
     const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -61443,6 +61598,10 @@ async function main() {
                 },
                 reactions: {
                     add: (args) => slack.reactions.add(args),
+                    // Change B 2026-05-07 — wired alongside reactions.add for the new
+                    // handleReopen multi-call dispatcher (un-strikes the root by removing
+                    // both terminal reactions).
+                    remove: (args) => slack.reactions.remove(args),
                 },
             },
             octokit: {
