@@ -244,3 +244,42 @@ All HIGH-severity threats were mitigated by structural defenses (typed allowlist
 4. **Single `pulls.get` reuse (Pitfall 8) held under real network conditions.** One Octokit fetch per handler invocation; FLT-02 + THRD-07 + thread_ts retrieval all reuse the same response. No race between marker-strip and handler entry observed.
 5. **D-06 grammar shipped as locked decision survives prose drift.** ROADMAP / REQUIREMENTS prose says "published 1 comment" for a single comment; D-06 (locked since Plan 01-03b in `src/lib/copy.ts`) says "commented" at N=1 and "published N comments" at N≥2. The bot ships D-06 form; the prose discrepancy is documentation drift to be corrected separately. The locked decision held under live verification (Scenario 4 user confirmation).
 6. **Forward-only silent marker is acceptable v1 behavior.** Scenario 9 confirmed the marker activates suppression from the moment it appears in the body; removal lifts the suppression. Threat T-03-03-07 (malicious commenter activates suppression) is bounded and reversible.
+
+## Closeout addendum — 2026-05-08 (YELLOW → GREEN)
+
+The four Y1-deferred scenarios (THRD-01 approve, THRD-01 changes_requested, STAT-01 approve/changes_requested, THRD-03 reviewer-add) were all live-validated on 2026-05-08, ahead of Phase 4 rollout. The Path A → Path B `users.yml` swap was performed in the personal sandbox rather than waiting for company-org rollout: a real second GitHub account (`kerwin-test`, id 282970308, created 2026-05-08T17:39:58Z) and a separate Slack member (`U0B2KC2S2AJ`) in the sandbox workspace were set up and added as collaborator on `Slaanesh233-sandbox/sandbox-repo-a`. `config/users.yml` was updated in commit `17fd301` (replacing `dummy-reviewer: U0B20676JVB` with `kerwin-test: U0B2KC2S2AJ`), pushed to sandbox PR-BOT main with explicit user approval per the standing no-remote-push rule.
+
+**Test PR:** [Slaanesh233-sandbox/sandbox-repo-a #12](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/12) — title `test: phase-3-yellow-closeout (auto)`, opened 2026-05-08T18:05:22Z by Slaanesh233 (no reviewer requested at open). Created and driven via `gh api` calls (no local clone of sandbox-repo-a). PR closed and branch deleted after validation.
+
+**Per-scenario evidence:**
+
+| # | Scenario | Workflow run | Bot log line | Visual confirmation in Slack |
+| - | -------- | ------------ | ------------ | ---------------------------- |
+| Closeout-0 | PR opened (root + marker) | [25571422795](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571422795) | `posted root for PR #12, thread_ts=1778263533.606429` | ✅ Marker `<!-- pr-bot:thread_ts=1778263533.606429 -->` confirmed in PR body via API |
+| Closeout-1 (was Scenario 5: THRD-03) | Reviewer added post-open via `pulls/{n}/requested_reviewers` POST | [25571469321](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571469321) | `posted reviewer-requested reply for PR #12` | ✅ User-confirmed `@kerwin-test` rendered as a real Slack ping in the thread reply (not literal text) |
+| Closeout-2 (was Scenarios 1, 2: THRD-01 approve + STAT-01) | kerwin-test submits APPROVED review | [25571610634](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571610634) | `posted review-submitted reply for PR #12 (state=approved)` | ✅ User-confirmed thread reply landed AND `:white_check_mark:` reaction added to root |
+| Closeout-3 (was Scenarios 1, 2: THRD-01 changes_requested + STAT-01 + STAT-04 swap) | kerwin-test submits CHANGES_REQUESTED review on same PR | [25571631100](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571631100) | `posted review-submitted reply for PR #12 (state=changes_requested)` | ✅ User-confirmed thread reply landed, `:warning:` reaction added to root, AND `:white_check_mark:` removed (STAT-04 swap held — only one status emoji at a time) |
+
+All four runs concluded `success` with no `setFailed`, no `soft-failed`, no `not_in_channel`, no `missing_scope`, no `already_reacted` log lines — meaning every `reactions.add` and `reactions.remove` call succeeded silently on first attempt. Zero live-fix iterations during closeout (matching the original Phase 3 keystone's clean run).
+
+**Updated verdict:** Phase 3 closes **GREEN** (was YELLOW). All 12/12 keystone scenarios live-validated; zero deferrals carrying forward to Phase 4. The Path A → Path B `users.yml` swap is no longer a Phase 4 unblock prerequisite — Phase 4's `users.yml` rewrite at the company org will use real teammate mappings, but the structural code path is now proven live.
+
+**Additional closeout outputs:**
+
+- `docs/PHASE-4-ORG-RECON.md` — read-only audit of the Pirros-io company org (member-not-admin scope; ~30 GET API calls; zero writes). Risk register R1–R9, pilot-repo selection (CS-Post-Call-Automations recommended; Slack-New-Relic-Integration backup), admin queries to run before Phase 4 plan-phase, action items going into discuss-phase.
+- `tests/config-schema.test.ts` updated: D-12 sandbox seed assertion now references `kerwin-test` instead of the retired `dummy-reviewer` key. All 162 tests still green.
+
+**Phase 4 unblock checklist updates** (supersedes the original list above):
+
+- [x] ~~Replace `dummy-reviewer` in `config/users.yml` with real team-member entries~~ — done in sandbox via `kerwin-test`. Phase 4 will perform the equivalent rewrite at company-org PR-BOT with real teammate `<github-login>: <Slack-U-id>` mappings for ~15 humans.
+- [x] ~~Reverify Scenarios 1, 2, 3, 5 live during Phase 4 pilot~~ — done in sandbox; Phase 4 pilot still gets organic re-verification under real traffic but it is no longer a blocker.
+- [ ] Recreate bot at `<company-org>/PR-BOT` via fresh push (DIST-01); set up org-level `SLACK_BOT_TOKEN`; enable "Accessible from repositories in the org" Actions setting; archive personal-sandbox repo for reference.
+- [ ] Cut `v1.0.0` immutable + `@v1` mutable major tag on company `PR-BOT`; pin caller stubs to `@v1` (DIST-03).
+- [ ] Pre-Phase-4 admin checks (from `docs/PHASE-4-ORG-RECON.md`): confirm org-level `default_workflow_permissions`, reusable workflow allowlist, and Pirros-Revit-Plugin ruleset conditions.
+
+### Closeout lessons
+
+7. **Path B works in sandbox without waiting for company rollout.** ~10 minutes to set up (alt GitHub account in Chrome via Safari/Chrome split, alt Slack account via different email), ~5 minutes to drive 4 events autonomously via `gh api` (Slaanesh233 opens the PR, kerwin-test drives reviews from a different browser session). Decoupling the live-validation from the company-org admin-coordination wall-clock means Phase 4 starts with a clean YELLOW-free Phase 3 and zero diagnostic ambiguity if a Phase 4 issue surfaces.
+8. **Workflow logs alone are sufficient evidence for structural pass.** The bot's `setFailed`-on-fail discipline means a `success` conclusion + the matching `posted X reply for PR #N` log line is high-confidence evidence that all I/O calls succeeded. Visual rendering still needs human confirmation (does the Slack `@mention` resolve, does the emoji actually show up) but the user's eyeball check at the end becomes a 30-second spot-check rather than a 15-minute step-by-step walkthrough.
+9. **PR creation via the GitHub Contents API + Pulls API is fast and avoids local-clone overhead.** Three API calls (create branch ref → PUT file content → POST pull) replace the local `git clone / commit / push` dance for sandbox-only test PRs. Useful pattern for any future automation that needs to drive sandbox-repo events without polluting the maintainer's local working tree.
+10. **`gh api -f reviewers[]=...` for `pulls/{n}/requested_reviewers` reliably triggers the `pull_request: review_requested` event** even though POST returns the standard pull-request representation. The webhook arrives within ~5 seconds; the bot's THRD-03 handler posts the thread reply in another ~10–15 seconds. Total round-trip from "add reviewer" to "Slack thread visible" was sub-30s in this run.
