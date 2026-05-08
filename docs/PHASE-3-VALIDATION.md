@@ -257,12 +257,33 @@ The four Y1-deferred scenarios (THRD-01 approve, THRD-01 changes_requested, STAT
 | - | -------- | ------------ | ------------ | ---------------------------- |
 | Closeout-0 | PR opened (root + marker) | [25571422795](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571422795) | `posted root for PR #12, thread_ts=1778263533.606429` | ✅ Marker `<!-- pr-bot:thread_ts=1778263533.606429 -->` confirmed in PR body via API |
 | Closeout-1 (was Scenario 5: THRD-03) | Reviewer added post-open via `pulls/{n}/requested_reviewers` POST | [25571469321](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571469321) | `posted reviewer-requested reply for PR #12` | ✅ User-confirmed `@kerwin-test` rendered as a real Slack ping in the thread reply (not literal text) |
-| Closeout-2 (was Scenarios 1, 2: THRD-01 approve + STAT-01) | kerwin-test submits APPROVED review | [25571610634](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571610634) | `posted review-submitted reply for PR #12 (state=approved)` | ✅ User-confirmed thread reply landed AND `:white_check_mark:` reaction added to root |
-| Closeout-3 (was Scenarios 1, 2: THRD-01 changes_requested + STAT-01 + STAT-04 swap) | kerwin-test submits CHANGES_REQUESTED review on same PR | [25571631100](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571631100) | `posted review-submitted reply for PR #12 (state=changes_requested)` | ✅ User-confirmed thread reply landed, `:warning:` reaction added to root, AND `:white_check_mark:` removed (STAT-04 swap held — only one status emoji at a time) |
+| Closeout-2 (was Scenarios 1, 2: THRD-01 approve + STAT-01) | kerwin-test submits APPROVED review | [25571610634](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571610634) | `posted review-submitted reply for PR #12 (state=approved)` | ✅ User-confirmed thread reply landed; `:white_check_mark:` reaction added to root (STAT-01 v1 behavior at the time of test) |
+| Closeout-3 (was Scenarios 1, 2: THRD-01 changes_requested + STAT-01) | kerwin-test submits CHANGES_REQUESTED review on same PR | [25571631100](https://github.com/Slaanesh233-sandbox/sandbox-repo-a/actions/runs/25571631100) | `posted review-submitted reply for PR #12 (state=changes_requested)` | ✅ User-confirmed thread reply landed; `:warning:` reaction added to root. **CORRECTION:** an earlier draft of this addendum claimed `:white_check_mark:` was removed via a "STAT-04 swap" — that was wrong (STAT-04 is the `already_reacted`-error guard, not a swap). User re-checked Slack 2026-05-08 and confirmed both reactions stacked. This drove the locked-spec design change below. |
 
-All four runs concluded `success` with no `setFailed`, no `soft-failed`, no `not_in_channel`, no `missing_scope`, no `already_reacted` log lines — meaning every `reactions.add` and `reactions.remove` call succeeded silently on first attempt. Zero live-fix iterations during closeout (matching the original Phase 3 keystone's clean run).
+All four runs concluded `success` with no `setFailed`, no `soft-failed`, no `not_in_channel`, no `missing_scope`, no `already_reacted` log lines — meaning every `reactions.add` call succeeded silently on first attempt. Zero live-fix iterations during closeout (matching the original Phase 3 keystone's clean run).
 
-**Updated verdict:** Phase 3 closes **GREEN** (was YELLOW). All 12/12 keystone scenarios live-validated; zero deferrals carrying forward to Phase 4. The Path A → Path B `users.yml` swap is no longer a Phase 4 unblock prerequisite — Phase 4's `users.yml` rewrite at the company org will use real teammate mappings, but the structural code path is now proven live.
+**Verdict at the close of the 2026-05-08 closeout session:** Phase 3 closes **GREEN** (was YELLOW). All 12/12 keystone scenarios live-validated; zero deferrals carrying forward to Phase 4.
+
+### Locked-spec design change — 2026-05-08T19:xx (post-closeout)
+
+The closeout exposed a real defect in v1 STAT-01 behavior: review-state reactions accumulated on the root rather than swapping. A single-reviewer flip (approve → changes_requested) left a stale `:white_check_mark:` lingering under the now-`:warning:`-state PR, misleading the at-a-glance channel scan. The spec change to fix this:
+
+- **STAT-01 (re-locked):** review-submitted events produce thread-reply text only — **NO root reaction** is added for any review event. The thread-reply text emoji prefix is decorative: `:thumbsup:` or `:ok_hand:` (random per event from new `APPROVED_EMOJI_POOL`) for approved; `:warning:` for changes-requested; comment-only stays router-skipped.
+- **STAT-02 / STAT-03 (unchanged):** terminal events still add `:tada:` (merge) / `:no_entry_sign:` (close-without-merge) to root. `handleReopen` still removes both terminal reactions on reopen (`src/index.ts:782-784`).
+- **Invariant:** at most ONE emoji reaction lives on a root message at any time, and it accurately reflects the PR's current terminal state. Alive PR → no reaction. Merged → `:tada:`. Closed → `:no_entry_sign:`. Reopened → cleared.
+
+Rationale: keeps the channel scan binary (emoji-on-root iff terminal); avoids the multi-reviewer-vs-single-reviewer-flip semantic conflict (multi-reviewer was the only case where review-on-root reactions were arguably correct, but per-event thread replies already carry that signal); decouples review verdicts from the status-board glance.
+
+**Code changes (committed separately from this addendum):**
+- `src/lib/copy.ts`: removed `REVIEW_REACTION` const, added `APPROVED_EMOJI_POOL = ['thumbsup', 'ok_hand']`, added `pickApprovedEmoji(rng?)`, updated `formatReviewReply` to take optional `approvedEmoji` arg
+- `src/index.ts:401-426`: review-submitted dispatcher pre-picks emoji once, passes to formatter, drops the prior `addReaction` call entirely (logs `state=approved, emoji=thumbsup` on info)
+- `tests/copy.test.ts`: REVIEW_REACTION tests replaced with APPROVED_EMOJI_POOL + pickApprovedEmoji deterministic-rng tests; `formatReviewReply` tests updated for both emojis
+- `tests/handler.test.ts`: review-submitted tests now assert no `reactionsAdd` calls + regex-match the random emoji in reply text; the 4 STAT-04 reactions-error tests repointed from `reviewSubmittedEvent` to `mergedEvent` since terminal events still exercise the shared `addReaction` error switch
+- `dist/index.js`: rebuilt
+- `.planning/REQUIREMENTS.md` STAT-01 + `.planning/ROADMAP.md` Phase 3 success criterion #1: re-locked to match new design
+- 168/168 tests green; typecheck/lint/format/broadcast-mention grep all clean
+
+**Updated verdict:** Phase 3 closes **GREEN** with the design change folded in. All 12/12 original keystone scenarios still live-validated; the post-closeout STAT-01 re-lock is structurally tested but the re-locked behavior itself has not been re-validated live in sandbox. A targeted re-validation (one approve → confirm no root reaction; one changes_requested → confirm no root reaction; one merge → confirm `:tada:` + strikethrough; reopen → confirm `:tada:` cleared; one close → confirm `:no_entry_sign:` + strikethrough) is recommended before the team demo (Step 2 of the user's plan) so demo screenshots reflect the new design.
 
 **Additional closeout outputs:**
 
