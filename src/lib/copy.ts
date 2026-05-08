@@ -27,30 +27,48 @@
 import type { ResolvedMention } from './types.js';
 
 // === Phase 3 — bare-name reaction lookups (Pitfall 3) =====================
-// Both lookups carry BARE emoji names (no colons) — that's what slack.reactions.add
-// expects. The colon-wrapped form (e.g. ':white_check_mark:') lives only inline in
-// the formatters' user-visible message text. Mixing them yields 'invalid_name' from
+// Lookups carry BARE emoji names (no colons) — that's what slack.reactions.add
+// expects. The colon-wrapped form (e.g. ':tada:') lives only inline in the
+// formatters' user-visible message text. Mixing them yields 'invalid_name' from
 // the Slack API.
 //
-// STAT-01 explicit: comment-only review produces NO reaction — the 'commented' key
-// is intentionally absent. Consumers that look up by review state must handle the
-// undefined case (formatReviewReply still runs for 'commented' but Plan 03-02's
-// dispatcher checks key existence before calling reactions.add).
-
-export const REVIEW_REACTION = {
-  approved: 'white_check_mark',
-  changes_requested: 'warning',
-  // 'commented' key absent because router-skip short-circuits commented-state reviews
-  // upstream (Change A 2026-05-07; see event-router.ts). Only approved + changes_requested
-  // events reach the dispatcher's REVIEW_REACTION[s.state] lookup. The dispatcher's
-  // defensive 'if reaction !== undefined' check is now structurally unreachable but kept
-  // as belt-and-braces.
-} as const;
+// Locked-spec 2026-05-08: the root-message reaction surface is RESERVED EXCLUSIVELY
+// for terminal-state events (merge / close-without-merge). Review-submitted events
+// (approve / changes_requested) produce thread replies ONLY — no root reactions.
+// This keeps the at-a-glance channel scan binary: emoji-on-root ↔ PR is in a
+// terminal state. Reopen clears both terminal reactions (handleReopen ×2 calls).
+// REVIEW_REACTION (the prior const mapping approved/changes_requested → bare names)
+// is removed because the dispatcher no longer adds root reactions for review events.
 
 export const TERMINAL_REACTION = {
   merged: 'tada',
   closed: 'no_entry_sign',
 } as const;
+
+// === Phase 3 — approve-state thread-reply emoji pool =======================
+// Per locked-spec 2026-05-08: approved-state thread replies render with a random
+// emoji prefix from this pool. The dispatcher pre-picks ONE emoji per approve
+// event via pickApprovedEmoji() and passes the bare name to formatReviewReply,
+// which wraps it with colons inline. This is THREAD-TEXT decoration only — no
+// root reaction is ever added for review events (see comment block above).
+//
+// Both members render as standard Slack emoji in any workspace without custom
+// emoji setup: ':thumbsup:' (👍) and ':ok_hand:' (👌).
+
+export const APPROVED_EMOJI_POOL = ['thumbsup', 'ok_hand'] as const;
+export type ApprovedEmoji = (typeof APPROVED_EMOJI_POOL)[number];
+
+/**
+ * Pick a random emoji name (BARE — no colons) from APPROVED_EMOJI_POOL.
+ *
+ * Accepts an optional `rng: () => number` (defaults to Math.random) so tests
+ * can drive deterministic picks without monkey-patching the global.
+ */
+export function pickApprovedEmoji(rng: () => number = Math.random): ApprovedEmoji {
+  const i = Math.floor(rng() * APPROVED_EMOJI_POOL.length);
+  // Safe: i ∈ [0, pool.length); pool length is a literal 2 at the type level.
+  return APPROVED_EMOJI_POOL[i]!;
+}
 
 // === Phase 3 — per-event reply-text formatters ============================
 // Every formatter takes ALREADY-RESOLVED ResolvedMention objects. Their .text
@@ -64,15 +82,25 @@ export const TERMINAL_REACTION = {
 
 /** THRD-01 review-submitted thread reply (actor-first, locked spec 2026-05-07).
  *  Change A 2026-05-07: 'commented' state is router-skipped upstream; this
- *  function only handles the two remaining verdicts (TS exhaustive — no default). */
+ *  function only handles the two remaining verdicts (TS exhaustive — no default).
+ *
+ *  Change B 2026-05-08: per locked-spec, review events produce thread reply ONLY
+ *  (no root reaction — see APPROVED_EMOJI_POOL comment block). The thread-reply
+ *  text emoji prefix is decorative; for `approved` state the dispatcher pre-picks
+ *  via pickApprovedEmoji() and passes the bare name in `approvedEmoji`. Default
+ *  fallback is 'thumbsup' so callers that omit the arg get a deterministic emoji
+ *  (mostly relevant for testing — production callers always pre-pick). */
 export function formatReviewReply(args: {
   readonly state: 'approved' | 'changes_requested';
   readonly reviewerMention: ResolvedMention;
+  readonly approvedEmoji?: ApprovedEmoji;
 }): string {
   const m = args.reviewerMention.text;
   switch (args.state) {
-    case 'approved':
-      return `:white_check_mark: ${m} approved the pull request`;
+    case 'approved': {
+      const emoji: ApprovedEmoji = args.approvedEmoji ?? 'thumbsup';
+      return `:${emoji}: ${m} approved the pull request`;
+    }
     case 'changes_requested':
       return `:warning: ${m} requested changes on the pull request`;
   }

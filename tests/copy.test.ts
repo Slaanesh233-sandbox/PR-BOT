@@ -9,13 +9,16 @@
 //   is conditional on N >= 2 only. N <= 0 / non-integer still throws RangeError to
 //   fail loudly rather than emit empty copy.
 //
-// REVIEW_REACTION + TERMINAL_REACTION lookup tables remain (still consumed by the
-// dispatcher in src/index.ts).
+// 2026-05-08: REVIEW_REACTION lookup table REMOVED — review-submitted events no
+// longer add root reactions per locked-spec (root reaction surface reserved for
+// terminal-state events). Approved-state thread-reply emoji is now picked at
+// dispatch time via pickApprovedEmoji() from APPROVED_EMOJI_POOL. TERMINAL_REACTION
+// remains (still consumed by handleTerminal + handleReopen in src/index.ts).
 
 import { describe, expect, it } from 'vitest';
 
 import {
-  REVIEW_REACTION,
+  APPROVED_EMOJI_POOL,
   TERMINAL_REACTION,
   formatCloseReply,
   formatMergeReply,
@@ -24,18 +27,39 @@ import {
   formatRequestedReviewReply,
   formatReviewCommentReply,
   formatReviewReply,
+  pickApprovedEmoji,
 } from '../src/lib/copy.js';
 import type { ResolvedMention } from '../src/lib/types.js';
 
-describe('REVIEW_REACTION (Pitfall 3 — bare names for reactions.add)', () => {
-  it("approved is the bare name 'white_check_mark' (no colons)", () => {
-    expect(REVIEW_REACTION.approved).toBe('white_check_mark');
+describe('APPROVED_EMOJI_POOL + pickApprovedEmoji (locked-spec 2026-05-08; thread-reply text only — no root reaction)', () => {
+  it("contains exactly the two locked-spec entries: 'thumbsup' and 'ok_hand'", () => {
+    expect(APPROVED_EMOJI_POOL).toEqual(['thumbsup', 'ok_hand']);
   });
-  it("changes_requested is the bare name 'warning'", () => {
-    expect(REVIEW_REACTION.changes_requested).toBe('warning');
+  it('every member is a BARE emoji name (no colons; Pitfall 3)', () => {
+    for (const name of APPROVED_EMOJI_POOL) {
+      expect(name.includes(':')).toBe(false);
+    }
   });
-  it("'commented' key is absent — Change A 2026-05-07 router-skips state==='commented' upstream so the lookup is two-state-exhaustive", () => {
-    expect((REVIEW_REACTION as { commented?: string }).commented).toBeUndefined();
+  it('pickApprovedEmoji with rng → 0 returns the first pool member (thumbsup)', () => {
+    expect(pickApprovedEmoji(() => 0)).toBe('thumbsup');
+  });
+  it('pickApprovedEmoji with rng → 0.999 returns the last pool member (ok_hand)', () => {
+    expect(pickApprovedEmoji(() => 0.999)).toBe('ok_hand');
+  });
+  it('pickApprovedEmoji with rng → 0.5 returns the second member (Math.floor boundary)', () => {
+    // Math.floor(0.5 * 2) === 1 → second member.
+    expect(pickApprovedEmoji(() => 0.5)).toBe('ok_hand');
+  });
+  it('pickApprovedEmoji with rng → 0.499 returns the first member (Math.floor boundary)', () => {
+    // Math.floor(0.499 * 2) === 0 → first member.
+    expect(pickApprovedEmoji(() => 0.499)).toBe('thumbsup');
+  });
+  it('pickApprovedEmoji default rng returns one of the pool members', () => {
+    // Smoke test: 50 calls, every result is a valid pool member.
+    for (let i = 0; i < 50; i++) {
+      const picked = pickApprovedEmoji();
+      expect(APPROVED_EMOJI_POOL).toContain(picked);
+    }
   });
 });
 
@@ -48,25 +72,44 @@ describe('TERMINAL_REACTION (Pitfall 3 — bare names)', () => {
   });
 });
 
-describe('formatReviewReply (THRD-01 — actor-first, locked spec 2026-05-07)', () => {
+describe('formatReviewReply (THRD-01 — actor-first, locked spec 2026-05-07; emoji random per locked-spec 2026-05-08)', () => {
   const m = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'r' });
-  it("approved → ':white_check_mark: <reviewer> approved the pull request'", () => {
+  it("approved with explicit approvedEmoji='thumbsup' → ':thumbsup: <reviewer> approved the pull request'", () => {
+    expect(
+      formatReviewReply({
+        state: 'approved',
+        reviewerMention: m('<@U123>'),
+        approvedEmoji: 'thumbsup',
+      }),
+    ).toBe(':thumbsup: <@U123> approved the pull request');
+  });
+  it("approved with explicit approvedEmoji='ok_hand' → ':ok_hand: <reviewer> approved the pull request'", () => {
+    expect(
+      formatReviewReply({
+        state: 'approved',
+        reviewerMention: m('<@U123>'),
+        approvedEmoji: 'ok_hand',
+      }),
+    ).toBe(':ok_hand: <@U123> approved the pull request');
+  });
+  it("approved without approvedEmoji defaults to 'thumbsup' (deterministic test fallback)", () => {
     expect(formatReviewReply({ state: 'approved', reviewerMention: m('<@U123>') })).toBe(
-      ':white_check_mark: <@U123> approved the pull request',
+      ':thumbsup: <@U123> approved the pull request',
     );
   });
-  it("changes_requested → ':warning: <reviewer> requested changes on the pull request'", () => {
+  it("changes_requested → ':warning: <reviewer> requested changes on the pull request' (approvedEmoji ignored)", () => {
     expect(formatReviewReply({ state: 'changes_requested', reviewerMention: m('<@U123>') })).toBe(
       ':warning: <@U123> requested changes on the pull request',
     );
   });
-  it('fallback mention text flows through unchanged', () => {
+  it('fallback mention text flows through unchanged (approve case with picked emoji)', () => {
     expect(
       formatReviewReply({
         state: 'approved',
         reviewerMention: { kind: 'fallback', text: '@unmapped', login: 'unmapped' },
+        approvedEmoji: 'ok_hand',
       }),
-    ).toBe(':white_check_mark: @unmapped approved the pull request');
+    ).toBe(':ok_hand: @unmapped approved the pull request');
   });
 });
 

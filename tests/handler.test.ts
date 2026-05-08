@@ -682,7 +682,7 @@ describe('handleEvent — Phase-2 open-class regression (no behavioral change)',
 describe('handleEvent — THRD-01 review submitted', () => {
   const validBody = `body content\n<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
 
-  it('approved → posts thread reply + adds white_check_mark reaction (STAT-01)', async () => {
+  it('approved → posts thread reply with random emoji from APPROVED_EMOJI_POOL; NO root reaction (locked-spec 2026-05-08)', async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, {
       event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
@@ -695,33 +695,30 @@ describe('handleEvent — THRD-01 review submitted', () => {
       blocks: unknown;
     };
     expect(args.thread_ts).toBe(SAMPLE_TS);
-    expect(args.text).toBe(`:white_check_mark: <@${KAI_SLACK_ID}> approved the pull request`);
+    // Random pick from APPROVED_EMOJI_POOL — assert text matches ':thumbsup:' OR ':ok_hand:'.
+    expect(args.text).toMatch(
+      new RegExp(`^:(thumbsup|ok_hand): <@${KAI_SLACK_ID}> approved the pull request$`),
+    );
     expect(args.channel).toBe(SANDBOX_CHANNEL_ID);
     expect(args.blocks).toBeDefined();
 
-    expect(spies.reactionsAdd).toHaveBeenCalledTimes(1);
-    const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as {
-      channel: string;
-      timestamp: string;
-      name: string;
-    };
-    expect(reactArgs.channel).toBe(SANDBOX_CHANNEL_ID);
-    expect(reactArgs.timestamp).toBe(SAMPLE_TS);
-    expect(reactArgs.name).toBe('white_check_mark'); // BARE name (Pitfall 3)
-    expect(reactArgs.name.includes(':')).toBe(false);
+    // Locked-spec 2026-05-08: review events do NOT add root reactions. Root
+    // reaction surface is reserved exclusively for terminal-state events
+    // (handleTerminal merge/close adds; handleReopen clears).
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
 
     expect(spies.setFailed).not.toHaveBeenCalled();
   });
 
-  it('changes_requested → :warning: reply + warning reaction', async () => {
+  it('changes_requested → :warning: thread reply only; NO root reaction (locked-spec 2026-05-08)', async () => {
     const { deps, spies } = makeMockDeps({ pullsGetBody: validBody });
     await handleEvent(deps, {
       event: reviewSubmittedEvent({ state: 'changes_requested', reviewerLogin: 'reviewer' }),
     });
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
     expect(args.text).toBe(`:warning: <@${KAI_SLACK_ID}> requested changes on the pull request`);
-    const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as { name: string };
-    expect(reactArgs.name).toBe('warning');
+    // Locked-spec 2026-05-08: no root reaction for review events.
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
   });
 
   it("commented → ZERO Slack calls + info 'commented-review-redundant-...' (Change A 2026-05-07; redundant with review-comment events)", async () => {
@@ -738,7 +735,7 @@ describe('handleEvent — THRD-01 review submitted', () => {
     expect(spies.setFailed).not.toHaveBeenCalled();
   });
 
-  it('unmapped reviewer → fallback @-text + warning logged; thread reply still posts', async () => {
+  it('unmapped reviewer → fallback @-text + warning logged; thread reply still posts (random approve emoji)', async () => {
     const { deps, spies } = makeMockDeps({
       pullsGetBody: validBody,
       users: { kai: KAI_SLACK_ID },
@@ -750,7 +747,9 @@ describe('handleEvent — THRD-01 review submitted', () => {
       expect.stringMatching(/no Slack ID mapping for github login "unknown-reviewer"/),
     );
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
-    expect(args.text).toBe(':white_check_mark: @unknown-reviewer approved the pull request');
+    expect(args.text).toMatch(/^:(thumbsup|ok_hand): @unknown-reviewer approved the pull request$/);
+    // Locked-spec 2026-05-08: no root reaction for review events.
+    expect(spies.reactionsAdd).not.toHaveBeenCalled();
   });
 });
 
@@ -975,6 +974,12 @@ describe('handleEvent — THRD-06 reopened (Change B 2026-05-07: multi-call un-s
 });
 
 // ===== Phase 3 — STAT-04 reactions error switch ===========================
+// 2026-05-08: review-submitted events no longer invoke addReaction (per locked-spec
+// "root reaction surface reserved for terminal events"). The STAT-04 error-handling
+// code paths in addReaction are still load-bearing for the TERMINAL events
+// (merge / close / reopen). These tests now drive via mergedEvent — the error
+// handler under test is the same shared helper regardless of which event triggers
+// the reactions.add call.
 
 describe('handleEvent — STAT-04 reactions error switch (Research §4 + Pitfall 16)', () => {
   const validBody = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
@@ -993,7 +998,7 @@ describe('handleEvent — STAT-04 reactions error switch (Research §4 + Pitfall
       },
     });
     await handleEvent(deps, {
-      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+      event: mergedEvent({ mergerLogin: 'merger' }),
     });
     expect(spies.postMessage).toHaveBeenCalledTimes(1); // thread reply still landed
     expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/already_reacted/));
@@ -1008,7 +1013,7 @@ describe('handleEvent — STAT-04 reactions error switch (Research §4 + Pitfall
       },
     });
     await handleEvent(deps, {
-      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+      event: mergedEvent({ mergerLogin: 'merger' }),
     });
     expect(spies.setFailed).toHaveBeenCalledWith(expect.stringMatching(/invalid_name/));
   });
@@ -1021,7 +1026,7 @@ describe('handleEvent — STAT-04 reactions error switch (Research §4 + Pitfall
       },
     });
     await handleEvent(deps, {
-      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+      event: mergedEvent({ mergerLogin: 'merger' }),
     });
     expect(spies.warning).toHaveBeenCalledWith(expect.stringMatching(/ratelimited/));
     expect(spies.setFailed).not.toHaveBeenCalled();
@@ -1035,7 +1040,7 @@ describe('handleEvent — STAT-04 reactions error switch (Research §4 + Pitfall
       },
     });
     await handleEvent(deps, {
-      event: reviewSubmittedEvent({ state: 'approved', reviewerLogin: 'reviewer' }),
+      event: mergedEvent({ mergerLogin: 'merger' }),
     });
     expect(spies.setFailed).toHaveBeenCalledWith(
       expect.stringMatching(/missing_scope|reactions:write/),

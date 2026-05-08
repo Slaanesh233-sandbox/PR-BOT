@@ -92,9 +92,9 @@ import {
   loadChannelConfig,
   loadUsersMap,
   parse as parseMarker,
+  pickApprovedEmoji,
   resolve as resolveMention,
   resolveAll as resolveAllMentions,
-  REVIEW_REACTION,
   TERMINAL_REACTION,
   type ChannelConfig,
   type GitHubLogin,
@@ -402,7 +402,17 @@ async function handleThreadKind(
     case 'review-submitted': {
       const s = routed.summary;
       const reviewerMention = resolveMention(s.reviewerLogin, deps.config.users, { warn });
-      const replyText = formatReviewReply({ state: s.state, reviewerMention });
+      // Locked-spec 2026-05-08: review-submitted produces thread reply ONLY.
+      // The root-message reaction surface is reserved for terminal-state events
+      // (merge / close-without-merge) so the at-a-glance channel scan stays
+      // binary: emoji-on-root iff the PR is in a terminal state. Reopen
+      // (handleReopen) clears both terminal reactions to flip back to "alive".
+      //
+      // Approved-state thread-reply text uses a random emoji from
+      // APPROVED_EMOJI_POOL — pick once per event, embed in the reply text.
+      // No reactions.add call here.
+      const approvedEmoji = s.state === 'approved' ? pickApprovedEmoji() : undefined;
+      const replyText = formatReviewReply({ state: s.state, reviewerMention, approvedEmoji });
       const reply = buildThreadReply({ text: replyText });
       const postOk = await postThreadReply(
         deps,
@@ -413,16 +423,10 @@ async function handleThreadKind(
         prNumber,
       );
       if (!postOk) return;
-      // STAT-01 + Change A 2026-05-07: only approved + changes_requested events reach this
-      // dispatcher (commented-state events are router-skipped upstream — see event-router.ts).
-      // The 'if (reaction !== undefined)' guard below is now structurally unreachable for
-      // the two remaining states (REVIEW_REACTION has both keys defined) but kept as
-      // defense-in-depth.
-      const reaction = REVIEW_REACTION[s.state as keyof typeof REVIEW_REACTION];
-      if (reaction !== undefined) {
-        await addReaction(deps, channel, threadTs, reaction, prNumber);
-      }
-      deps.logger.info(`posted review-submitted reply for PR #${prNumber} (state=${s.state})`);
+      const emojiSuffix = approvedEmoji !== undefined ? `, emoji=${approvedEmoji}` : '';
+      deps.logger.info(
+        `posted review-submitted reply for PR #${prNumber} (state=${s.state}${emojiSuffix})`,
+      );
       return;
     }
     case 'pr-comment': {
