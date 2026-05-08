@@ -847,9 +847,9 @@ describe('handleEvent — THRD-06 reopened (Change B 2026-05-07: multi-call un-s
     };
     expect(updateArgs.ts).toBe(SAMPLE_TS);
     expect(updateArgs.channel).toBe(SANDBOX_CHANNEL_ID);
-    // Un-struck root — NO leading/trailing tildes (vs handleTerminal which wraps).
+    // Un-struck root — NO leading/trailing tildes (vs handleTerminal which per-line wraps).
     expect(updateArgs.text).toBe(
-      `<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>: <@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>.`,
+      `<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>:\n<@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>.`,
     );
     expect(updateArgs.text.startsWith('~')).toBe(false);
     expect(updateArgs.text.endsWith('~')).toBe(false);
@@ -867,7 +867,7 @@ describe('handleEvent — THRD-06 reopened (Change B 2026-05-07: multi-call un-s
     });
     const updateArgs = spies.chatUpdate.mock.calls[0]![0] as { text: string };
     expect(updateArgs.text).toBe(
-      `<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>: <@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>. cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>`,
+      `<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>:\n<@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>. cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>`,
     );
   });
 
@@ -1083,13 +1083,13 @@ describe('handleEvent — THRD-04 + STAT-02 merge (multi-call dispatcher)', () =
     expect(updateArgs.ts).toBe(SAMPLE_TS);
     expect(updateArgs.channel).toBe(SANDBOX_CHANNEL_ID);
     expect(updateArgs.text).toBe(
-      `~<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>: <@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>.~`,
+      `~<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>:~\n~<@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>.~`,
     );
     expect(updateArgs.blocks).toBeDefined();
     expect(updateArgs.thread_ts).toBeUndefined(); // Pitfall 9
   });
 
-  it('with reviewers: chat.update strikethrough wraps cc clause too', async () => {
+  it('with reviewers: chat.update strikethrough wraps cc clause too (per-line tildes; cc on author/pr line)', async () => {
     const { deps, spies } = makeMockDeps({
       pullsGetBody: validBody,
       users: { kai: KAI_SLACK_ID, merger: KAI_SLACK_ID, r1: KAI_SLACK_ID, r2: KAI_SLACK_ID },
@@ -1099,7 +1099,7 @@ describe('handleEvent — THRD-04 + STAT-02 merge (multi-call dispatcher)', () =
     });
     const updateArgs = spies.chatUpdate.mock.calls[0]![0] as { text: string };
     expect(updateArgs.text).toBe(
-      `~<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>: <@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>. cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>~`,
+      `~<https://github.com/Slaanesh233-sandbox/sandbox-repo-a|sandbox-repo-a>:~\n~<@${KAI_SLACK_ID}> has published a <https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/42|pull request>. cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>~`,
     );
   });
 
@@ -1177,8 +1177,10 @@ describe('handleEvent — THRD-05 + STAT-03 close-without-merge', () => {
     const reactArgs = spies.reactionsAdd.mock.calls[0]![0] as { name: string };
     expect(reactArgs.name).toBe('no_entry_sign');
     const updateArgs = spies.chatUpdate.mock.calls[0]![0] as { text: string };
+    // Locked-spec 2026-05-08: per-line tilde wrap (Slack mrkdwn strikethrough does
+    // not cross newlines). Two-line shape: `~repo:~\n~author has published a |pull request>.~`.
     expect(updateArgs.text).toMatch(
-      /^~<https:\/\/github\.com\/[^|]+\|sandbox-repo-a>: .* has published a .*\|pull request>\.~$/,
+      /^~<https:\/\/github\.com\/[^|]+\|sandbox-repo-a>:~\n~.* has published a .*\|pull request>\.~$/,
     );
     expect(updateArgs.text.startsWith('~')).toBe(true);
     expect(updateArgs.text.endsWith('~')).toBe(true);

@@ -1,12 +1,23 @@
 // Blocks module — Block Kit builders for the OPEN-04 root message and thread replies.
 //
-// OPEN-04 root format (locked spec 2026-05-07; supersedes the prior 2026-05-06 phrasing).
+// OPEN-04 root format (locked spec 2026-05-08; supersedes the 2026-05-07 single-line
+// phrasing — the colon-then-newline split makes the channel scan easier to parse:
+// the repo header sits on its own line; the author + pr-link line reads like a one-line
+// summary below it).
 // Every emitted root post — whether the live OPEN-04 root or the STAT-02/STAT-03
 // strikethrough rebuild — follows this template:
 //
-//   With NO reviewers:    `<repoUrl|repoShortName>: <author-mention> has published a
-//                          <prHtmlUrl|pull request>.`
-//   With reviewers:       same, plus ` cc <r1> <r2> …` after the trailing period.
+//   With NO reviewers:    `<repoUrl|repoShortName>:\n
+//                          <author-mention> has published a <prHtmlUrl|pull request>.`
+//   With reviewers:       same, plus ` cc <r1> <r2> …` after the trailing period
+//                          (cc clause stays on the same line as the author/pr summary).
+//
+// Strikethrough form (STAT-02/STAT-03): Slack mrkdwn `~text~` strikethrough does NOT
+// cross newline boundaries — `~A\nB~` would render literal tildes. So
+// buildStrikethroughRoot splits on `\n` and wraps each line individually:
+//   `~<repoUrl|repoShortName>:~\n~<author-mention> has published a <prHtmlUrl|pull request>.~`
+// Each line gets its own `~ ... ~` wrap. handleReopen still rebuilds the un-struck form
+// via buildRootMessage, so the same multi-line shape carries through both paths.
 //
 // Two Slack mrkdwn link forms appear in the output:
 //   - Repo home link: built from `<args.repoUrl|args.repoShortName>` (repo home URL,
@@ -92,7 +103,7 @@ export function buildRootMessage(args: BuildRootArgs): {
 } {
   const repoLink = `<${args.repoUrl}|${args.repoShortName}>`;
   const prLink = `<${args.prHtmlUrl}|pull request>`;
-  let raw = `${repoLink}: ${args.authorMention.text} has published a ${prLink}.`;
+  let raw = `${repoLink}:\n${args.authorMention.text} has published a ${prLink}.`;
   if (args.reviewerMentions.length > 0) {
     const cc = args.reviewerMentions.map((m) => m.text).join(' ');
     raw += ` cc ${cc}`;
@@ -139,12 +150,17 @@ export function buildStrikethroughRoot(args: BuildRootArgs): {
 } {
   const repoLink = `<${args.repoUrl}|${args.repoShortName}>`;
   const prLink = `<${args.prHtmlUrl}|pull request>`;
-  let raw = `${repoLink}: ${args.authorMention.text} has published a ${prLink}.`;
+  let raw = `${repoLink}:\n${args.authorMention.text} has published a ${prLink}.`;
   if (args.reviewerMentions.length > 0) {
     const cc = args.reviewerMentions.map((m) => m.text).join(' ');
     raw += ` cc ${cc}`;
   }
-  const struck = `~${raw}~`;
+  // Slack mrkdwn `~text~` strikethrough does NOT cross newlines; wrap each line
+  // individually so both lines render with the strike applied.
+  const struck = raw
+    .split('\n')
+    .map((line) => `~${line}~`)
+    .join('\n');
   const capped = capSectionText(struck);
   return {
     blocks: [{ type: 'section', text: { type: 'mrkdwn', text: capped } }],

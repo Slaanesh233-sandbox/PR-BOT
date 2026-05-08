@@ -298,8 +298,10 @@ async function handleOpen(
 
   // Pitfall 8: plain-text fallback for accessibility / DnD push notifications.
   // Built from already-resolved ResolvedMention.text strings — no new mention syntax here.
-  // Mirrors the locked-spec mrkdwn root copy ("has published a" + "pull request" lowercase).
-  let fallbackText = `${repoShortName}: ${authorMention.text} has published a pull request.`;
+  // Mirrors the locked-spec mrkdwn root copy: colon-then-newline split between the
+  // repo header and the author/pr-summary line (matches buildRootMessage's
+  // `${repoLink}:\n${authorMention.text} has published a ${prLink}.` shape).
+  let fallbackText = `${repoShortName}:\n${authorMention.text} has published a pull request.`;
   if (reviewerMentions.length > 0) {
     fallbackText += ` cc ${reviewerMentions.map((m) => m.text).join(' ')}`;
   }

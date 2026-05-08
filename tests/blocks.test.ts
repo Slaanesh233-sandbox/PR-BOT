@@ -66,11 +66,11 @@ describe('blocks.buildRootMessage', () => {
       reviewerMentions: [],
     });
     expect(getSectionText(result)).toBe(
-      '<https://github.com/x/y|my-pkg>: <@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>.',
+      '<https://github.com/x/y|my-pkg>:\n<@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>.',
     );
   });
 
-  it('appends " cc <r1> <r2>" with two reviewers (mixed mapped + fallback texts)', () => {
+  it('appends " cc <r1> <r2>" with two reviewers (mixed mapped + fallback texts; cc stays on the author/pr line)', () => {
     const result = buildRootMessage({
       repoShortName: 'my-pkg',
       repoUrl: REPO_URL,
@@ -79,9 +79,9 @@ describe('blocks.buildRootMessage', () => {
       reviewerMentions: [reviewerMapped, reviewerFallback],
     });
     const text = getSectionText(result);
-    // Exact suffix match — order is preserved from the input mention list.
+    // Exact match — repo header on line 1, author + pr-link + cc clause on line 2.
     expect(text).toBe(
-      '<https://github.com/x/y|my-pkg>: <@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>. cc <@U01EFGH6789> @bob',
+      '<https://github.com/x/y|my-pkg>:\n<@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>. cc <@U01EFGH6789> @bob',
     );
   });
 
@@ -147,15 +147,15 @@ describe('blocks.buildRootMessage', () => {
     });
     expect(result.blocks).toBeDefined();
     expect(result.text).toBeDefined();
-    // text is the un-wrapped form — same as buildStrikethroughRoot's text MINUS the leading and trailing tildes.
+    // text is the un-wrapped form — same as buildStrikethroughRoot's text MINUS the per-line tildes.
     expect(result.text).toBe(
-      '<https://github.com/x/y|my-pkg>: <@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>.',
+      '<https://github.com/x/y|my-pkg>:\n<@U01ABCD2345> has published a <https://github.com/x/y/pull/42|pull request>.',
     );
     expect(result.text.startsWith('~')).toBe(false);
     expect(result.text.endsWith('~')).toBe(false);
   });
 
-  it("text mirrors buildStrikethroughRoot's text minus the surrounding tildes (with reviewers cc clause)", () => {
+  it("text relates to buildStrikethroughRoot's text via per-line tilde wrap (locked-spec 2026-05-08; with reviewers cc clause)", () => {
     const args = {
       repoShortName: 'my-pkg',
       repoUrl: REPO_URL,
@@ -165,8 +165,13 @@ describe('blocks.buildRootMessage', () => {
     } as const;
     const live = buildRootMessage(args);
     const struck = buildStrikethroughRoot(args);
-    // Sanity: struck wraps the same body in tildes; live is the un-wrapped form.
-    expect(struck.text).toBe(`~${live.text}~`);
+    // Per-line tilde wrap: split live text on '\n', wrap each line in `~ ... ~`, rejoin.
+    // Slack mrkdwn strikethrough does not cross newlines, so this shape is mandatory.
+    const expected = live.text
+      .split('\n')
+      .map((line) => `~${line}~`)
+      .join('\n');
+    expect(struck.text).toBe(expected);
   });
 });
 
@@ -190,7 +195,7 @@ describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', ()
   const author = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'a' });
   const reviewer = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'r' });
 
-  it('no reviewers → wraps the full OPEN-04-shaped line in single tildes; returns blocks AND text', () => {
+  it('no reviewers → per-line tilde wrap (locked-spec 2026-05-08); returns blocks AND text', () => {
     const r = buildStrikethroughRoot({
       repoShortName: 'sandbox-repo-a',
       repoUrl: 'https://github.com/o/r',
@@ -199,7 +204,7 @@ describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', ()
       reviewerMentions: [],
     });
     expect(r.text).toBe(
-      '~<https://github.com/o/r|sandbox-repo-a>: <@UAUTH> has published a <https://github.com/o/r/pull/4|pull request>.~',
+      '~<https://github.com/o/r|sandbox-repo-a>:~\n~<@UAUTH> has published a <https://github.com/o/r/pull/4|pull request>.~',
     );
     expect(r.blocks).toHaveLength(1);
     const block = r.blocks[0] as { type: string; text: { type: string; text: string } };
@@ -208,7 +213,7 @@ describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', ()
     expect(block.text.text).toBe(r.text); // dual-return parity (Pitfall 2)
   });
 
-  it('with reviewers → strikethrough wraps cc clause too', () => {
+  it('with reviewers → strikethrough wraps cc clause on the same line as the author/pr summary', () => {
     const r = buildStrikethroughRoot({
       repoShortName: 'sandbox-repo-a',
       repoUrl: 'https://github.com/o/r',
@@ -217,7 +222,7 @@ describe('buildStrikethroughRoot (STAT-02 / STAT-03; Pitfall 2 dual-return)', ()
       reviewerMentions: [reviewer('<@UR1>'), reviewer('<@UR2>')],
     });
     expect(r.text).toBe(
-      '~<https://github.com/o/r|sandbox-repo-a>: <@UAUTH> has published a <https://github.com/o/r/pull/4|pull request>. cc <@UR1> <@UR2>~',
+      '~<https://github.com/o/r|sandbox-repo-a>:~\n~<@UAUTH> has published a <https://github.com/o/r/pull/4|pull request>. cc <@UR1> <@UR2>~',
     );
   });
 
