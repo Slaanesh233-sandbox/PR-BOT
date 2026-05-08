@@ -165,12 +165,12 @@ describe('formatReviewCommentReply (THRD-02 inline review-comment; always explic
 
 describe('formatRequestedReviewReply / formatReopenReply / formatMergeReply / formatCloseReply (actor-first, locked spec 2026-05-07)', () => {
   const m = (text: string): ResolvedMention => ({ kind: 'mapped', text, login: 'x' });
-  it('formatRequestedReviewReply → "<reviewer> was added as a reviewer on the pull request"', () => {
+  it('formatRequestedReviewReply → "<reviewer> was requested for review on the pull request" (locked-spec 2026-05-08; reads correctly for first-request AND re-request)', () => {
     expect(
       formatRequestedReviewReply({
         requestedReviewerMention: m('<@URev>'),
       }),
-    ).toBe('<@URev> was added as a reviewer on the pull request');
+    ).toBe('<@URev> was requested for review on the pull request');
   });
   it("formatReopenReply → '<reopener> reopened the pull request'", () => {
     expect(formatReopenReply({ reopenerMention: m('<@UReo>') })).toBe(

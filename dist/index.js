@@ -60523,7 +60523,14 @@ function formatReviewCommentReply(args) {
  * sender / requester.)
  */
 function formatRequestedReviewReply(args) {
-    return `${args.requestedReviewerMention.text} was added as a reviewer on the pull request`;
+    // Locked-spec 2026-05-08: copy reads correctly for BOTH first request and
+    // re-request. The `pull_request: review_requested` webhook payload is
+    // identical for both cases (the GitHub UI's circular-arrow "Re-request review"
+    // button fires the same event as a first-time request), so the bot cannot
+    // structurally distinguish them. Earlier copy "was added as a reviewer"
+    // misleads on re-request (the reviewer was already a reviewer); "was
+    // requested for review" reads correctly in both cases.
+    return `${args.requestedReviewerMention.text} was requested for review on the pull request`;
 }
 /** THRD-06 reopen thread reply (actor-first, locked spec 2026-05-07). */
 function formatReopenReply(args) {
