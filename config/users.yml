@@ -1,13 +1,14 @@
 # Sandbox seed (D-12). Real teammate Slack IDs are added at P4 rollout when the bot
 # moves to the company org.
 #
-# These are real Slack user IDs captured from the personal sandbox workspace
-# (Plan 01-02 Section E). Per Path A: `dummy-reviewer` reuses the same Slack ID
-# as the user for now — Phase 1 schema validates regex shape only, and Phase 2
-# keystone testing can run without a second human. Before Phase 2 reviewer-flow
-# tests (specifically THRD-03), replace `dummy-reviewer` with a real second
-# account's Slack ID and add that GitHub user as a collaborator on the sandbox
-# repos.
+# 2026-05-08: Path A (`dummy-reviewer` reusing the maintainer's Slack ID) was
+# closed out by adding the real second account `kerwin-test` (a separate
+# GitHub login + a separate Slack member ID in the sandbox workspace), so the
+# Phase 3 YELLOW-deferred reviewer-flow scenarios (THRD-01 approve /
+# changes_requested, STAT-01 emoji on those review states, THRD-03 reviewer-add)
+# can be exercised live with two distinct senders. The Slack IDs below are real
+# values captured from the personal sandbox workspace (Plan 01-02 Section E +
+# 2026-05-08 Path-B closure).
 #
 # Username convention: keys are GitHub LOGINS (matching `pull_request.user.login`
 # in the webhook payload), NOT first names. The first live keystone test on
@@ -21,4 +22,4 @@
 #   - each value matches /^U[A-Z0-9]+$/  (D-05, D-14)
 users:
   Slaanesh233: U0B20676JVB
-  dummy-reviewer: U0B20676JVB
+  kerwin-test: U0B2KC2S2AJ
