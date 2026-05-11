@@ -218,9 +218,7 @@ describe('marker.serializeStalePingedAt + round-trip', () => {
   });
 
   it('round-trip: parseStalePingedAt(serializeStalePingedAt(d)) === d (string equality)', () => {
-    expect(parseStalePingedAt(serializeStalePingedAt(STALE_DATE_FIXTURE))).toBe(
-      STALE_DATE_FIXTURE,
-    );
+    expect(parseStalePingedAt(serializeStalePingedAt(STALE_DATE_FIXTURE))).toBe(STALE_DATE_FIXTURE);
   });
 });
 
@@ -264,9 +262,9 @@ describe('marker.injectStalePingedAt', () => {
 
 describe('marker.parseStalePingCount + serialize + inject', () => {
   it('parse returns the count string when present', () => {
-    expect(
-      parseStalePingCount(`<!-- pr-bot:stale_ping_count=${STALE_COUNT_FIXTURE} -->`),
-    ).toBe(STALE_COUNT_FIXTURE);
+    expect(parseStalePingCount(`<!-- pr-bot:stale_ping_count=${STALE_COUNT_FIXTURE} -->`)).toBe(
+      STALE_COUNT_FIXTURE,
+    );
   });
 
   it('parse returns null when absent', () => {
@@ -299,9 +297,7 @@ describe('marker.parseStalePingCount + serialize + inject', () => {
     const body = `Body.\n<!-- pr-bot:stale_ping_count=${STALE_COUNT_FIXTURE} -->\nTail.`;
     const result = injectStalePingCount(body, STALE_COUNT_FIXTURE_2);
     expect(parseStalePingCount(result)).toBe(STALE_COUNT_FIXTURE_2);
-    expect(result).not.toContain(
-      `stale_ping_count=${STALE_COUNT_FIXTURE} `,
-    );
+    expect(result).not.toContain(`stale_ping_count=${STALE_COUNT_FIXTURE} `);
   });
 });
 
@@ -345,24 +341,24 @@ describe('marker — cross-marker coexistence (Phase-1 + Phase-3.1 markers share
 
 describe('STALE_PINGED_AT_REGEX + STALE_PING_COUNT_REGEX (case-strict; Pitfall 17 parity with SILENT_MARKER)', () => {
   it('STALE_PINGED_AT_REGEX matches the lower-case canonical shape', () => {
-    expect(STALE_PINGED_AT_REGEX.test(`<!-- pr-bot:stale_pinged_at=${STALE_DATE_FIXTURE} -->`)).toBe(
-      true,
-    );
+    expect(
+      STALE_PINGED_AT_REGEX.test(`<!-- pr-bot:stale_pinged_at=${STALE_DATE_FIXTURE} -->`),
+    ).toBe(true);
   });
 
   it('STALE_PINGED_AT_REGEX does NOT match upper-case variants', () => {
-    expect(STALE_PINGED_AT_REGEX.test(`<!-- pr-bot:STALE_PINGED_AT=${STALE_DATE_FIXTURE} -->`)).toBe(
-      false,
-    );
-    expect(STALE_PINGED_AT_REGEX.test(`<!-- PR-BOT:stale_pinged_at=${STALE_DATE_FIXTURE} -->`)).toBe(
-      false,
-    );
+    expect(
+      STALE_PINGED_AT_REGEX.test(`<!-- pr-bot:STALE_PINGED_AT=${STALE_DATE_FIXTURE} -->`),
+    ).toBe(false);
+    expect(
+      STALE_PINGED_AT_REGEX.test(`<!-- PR-BOT:stale_pinged_at=${STALE_DATE_FIXTURE} -->`),
+    ).toBe(false);
   });
 
   it('STALE_PING_COUNT_REGEX matches the canonical shape', () => {
-    expect(STALE_PING_COUNT_REGEX.test(`<!-- pr-bot:stale_ping_count=${STALE_COUNT_FIXTURE} -->`)).toBe(
-      true,
-    );
+    expect(
+      STALE_PING_COUNT_REGEX.test(`<!-- pr-bot:stale_ping_count=${STALE_COUNT_FIXTURE} -->`),
+    ).toBe(true);
   });
 
   it('STALE_PING_COUNT_REGEX does NOT match upper-case variants', () => {

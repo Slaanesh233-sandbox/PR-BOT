@@ -89,3 +89,91 @@ export const SILENT_MARKER = '<!-- pr-bot:silent -->';
 export function isSilent(body: string): boolean {
   return body.includes(SILENT_MARKER);
 }
+
+// === Phase 3.1 — stale-PR marker shapes (parallel to Phase-1 thread_ts) =====
+//
+// Two new marker shapes ride on the same `<!-- pr-bot:<token>=<value> -->`
+// convention as the Phase-1 thread_ts marker. Same idempotency invariants
+// (D-02 / FND-06): values are STRINGS end-to-end; serialize/parse round-trip
+// preserves byte equality; inject is idempotent on same value and
+// replace-in-place on different.
+//
+//   - stale_pinged_at: ISO-8601 date (YYYY-MM-DD), no time / timezone. Keeps
+//     the marker idempotent across runners (no DST footgun inside the marker
+//     itself; the surrounding businessDaysBetween helper already handles DST
+//     via UTC midnight interpretation).
+//
+//   - stale_ping_count: positive-integer STRING (e.g. '1', '2', '3'). The
+//     dispatcher in Plan 03.1-02 parses this to an integer ONCE at the
+//     comparison site against MAX_PINGS_PER_PR (via parseInt(., 10), with
+//     NaN -> 0 fallback for paranoia). Inside this module the count is an
+//     opaque text token — D-02 / FND-06 parity with thread_ts. No float
+//     coercion anywhere in this file (the forbidden-coercion grep gate
+//     enforces this on every CI run).
+//
+// FLT-02 / Pitfall 17 parity: regex matching is whitespace-tolerant inside
+// the comment (same `\s*` pattern as MARKER_REGEX) but token-strict — the
+// `stale_pinged_at` / `stale_ping_count` substrings are case-sensitive.
+
+/**
+ * Matches `<!-- pr-bot:stale_pinged_at=<DATE> -->` (with optional surrounding
+ * whitespace inside the comment). Non-greedy `\S+?` capture; no `g` flag.
+ */
+export const STALE_PINGED_AT_REGEX = /<!--\s*pr-bot:stale_pinged_at=(\S+?)\s*-->/;
+
+/**
+ * Matches `<!-- pr-bot:stale_ping_count=<N> -->` (same shape). Non-greedy
+ * `\S+?` capture; no `g` flag.
+ */
+export const STALE_PING_COUNT_REGEX = /<!--\s*pr-bot:stale_ping_count=(\S+?)\s*-->/;
+
+/** Extract the embedded `stale_pinged_at` ISO date. Returns `null` if absent. */
+export function parseStalePingedAt(body: string): string | null {
+  const m = body.match(STALE_PINGED_AT_REGEX);
+  return m && m[1] !== undefined ? m[1] : null;
+}
+
+/** Render a stale_pinged_at marker. Output: `<!-- pr-bot:stale_pinged_at=${date} -->`. */
+export function serializeStalePingedAt(date: string): string {
+  return `<!-- pr-bot:stale_pinged_at=${date} -->`;
+}
+
+/**
+ * Idempotent marker write — same semantics as Phase-1 `inject`:
+ *   - same value already present → return body unchanged
+ *   - different value present    → replace in place
+ *   - no marker present          → append with `\n\n` separator
+ */
+export function injectStalePingedAt(body: string, date: string): string {
+  if (STALE_PINGED_AT_REGEX.test(body)) {
+    const existing = parseStalePingedAt(body);
+    if (existing === date) return body;
+    return body.replace(STALE_PINGED_AT_REGEX, serializeStalePingedAt(date));
+  }
+  if (body.length === 0) return serializeStalePingedAt(date);
+  const sep = body.endsWith('\n\n') ? '' : body.endsWith('\n') ? '\n' : '\n\n';
+  return `${body}${sep}${serializeStalePingedAt(date)}`;
+}
+
+/** Extract the embedded `stale_ping_count` integer-string. Returns `null` if absent. */
+export function parseStalePingCount(body: string): string | null {
+  const m = body.match(STALE_PING_COUNT_REGEX);
+  return m && m[1] !== undefined ? m[1] : null;
+}
+
+/** Render a stale_ping_count marker. Output: `<!-- pr-bot:stale_ping_count=${count} -->`. */
+export function serializeStalePingCount(count: string): string {
+  return `<!-- pr-bot:stale_ping_count=${count} -->`;
+}
+
+/** Idempotent marker write — same semantics as `injectStalePingedAt`. */
+export function injectStalePingCount(body: string, count: string): string {
+  if (STALE_PING_COUNT_REGEX.test(body)) {
+    const existing = parseStalePingCount(body);
+    if (existing === count) return body;
+    return body.replace(STALE_PING_COUNT_REGEX, serializeStalePingCount(count));
+  }
+  if (body.length === 0) return serializeStalePingCount(count);
+  const sep = body.endsWith('\n\n') ? '' : body.endsWith('\n') ? '\n' : '\n\n';
+  return `${body}${sep}${serializeStalePingCount(count)}`;
+}
