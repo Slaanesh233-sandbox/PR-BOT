@@ -1828,6 +1828,48 @@ describe('handleStaleCheck — defensive: missing stale-check config', () => {
   });
 });
 
+// WR-01 — per-PR error isolation. The handleStaleCheck loop must not abort the
+// run when processOnePrForStaleCheck throws on one PR; later PRs must still be
+// considered. Existing tests cover graceful failure paths (setFailed-via-
+// postThreadReply, 4xx setFailed-via-patchWithRetry). They do NOT cover an
+// unclassified throw mid-loop; this suite does.
+//
+// The current throw path exercised here: pr.created_at is malformed enough
+// that filter step 5 short-circuits via Number.isFinite=false (no return), and
+// filter step 6 then calls businessDaysBetween(pr.created_at.slice(0, 10), ...)
+// with a non-ISO date which throws RangeError from parseIsoDateToUtcMs.
+//
+// WR-05 adds an early return when createdAt is malformed; this test still
+// provides defense-in-depth for any future throw path (e.g. a malformed marker
+// past WR-06, an unrelated octokit/Slack exception leaking past the inner
+// guards). The PR-numbered warning log is also asserted.
+describe('handleStaleCheck — WR-01 per-PR error isolation', () => {
+  it('PR with malformed created_at + malformed stale_pinged_at → warning + next PR still pinged', async () => {
+    // PR #201 carries garbage in BOTH created_at and the stale_pinged_at marker.
+    // Without the WR-01 outer try/catch, processOnePrForStaleCheck throws a
+    // RangeError from businessDaysBetween and aborts the loop for PR #202.
+    const garbageBody =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=garbage-not-a-date -->`;
+    const prs: FakePr[] = [
+      fakePr({ number: 201, body: garbageBody, createdAtISO: 'totally-not-a-date' }),
+      fakePr({ number: 202 }), // eligible
+    ];
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList(prs),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    // PR #202 must still have been pinged regardless of what happened to PR #201.
+    expect(spies.pullsUpdate.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const pullNumbers = spies.pullsUpdate.mock.calls.map(
+      (call) => (call[0] as { pull_number: number }).pull_number,
+    );
+    expect(pullNumbers).toContain(202);
+  });
+});
+
 // Sanity check that the on-disk config still parses (parity with the
 // config-schema test, but exercised here so tests/handler.test.ts test budget
 // remains coherent).
