@@ -4,6 +4,16 @@
 # Defaults applied if a key is absent: stale_threshold_business_days=3,
 # max_age_days=30, reping_interval_business_days=2, max_pings_per_pr=3.
 #
+# Field bounds (D3 relaxation):
+#   - stale_threshold_business_days: non-negative integer (>= 0). 0 means
+#     every eligible PR is stale immediately (no minimum-age window).
+#   - max_age_days: positive integer (>= 1).
+#   - reping_interval_business_days: non-negative integer (>= 0). 0 means
+#     no cooldown between pings; every cron run re-pings eligible PRs,
+#     capped only by max_pings_per_pr. PRODUCTION SAFETY: setting 0 is
+#     risky on a frequent cron — a runtime warning fires at startup.
+#   - max_pings_per_pr: positive integer (>= 1).
+#
 # The `holidays:` list is ISO-8601 date strings (YYYY-MM-DD). Strict regex
 # /^\d{4}-\d{2}-\d{2}$/. Append company-specific holidays (Pirros holidays,
 # year-end shutdown weeks, etc.) below the US federal list.

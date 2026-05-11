@@ -164,9 +164,17 @@ function requireNonNegativeInteger(field: string, value: unknown): number {
  *   - top-level mapping (object); empty/null body allowed (returns all defaults)
  *   - `holidays`: array of ISO-8601 date strings matching /^\d{4}-\d{2}-\d{2}$/.
  *     Default: [] (no extra holidays beyond the cron's Mon-Fri restriction).
- *   - `stale_threshold_business_days`: positive integer; default 3
+ *   - `stale_threshold_business_days`: non-negative integer (0 = every
+ *     eligible PR is stale immediately, no minimum-age window); default 3.
+ *     The D3 relaxation from positive-integer is required by the Phase 3.1
+ *     keystone (Plan 03.1-03 M5 → M10 Option-B override window) so a
+ *     same-day PR can exercise the eligible-fires path.
  *   - `max_age_days`: positive integer; default 30
- *   - `reping_interval_business_days`: positive integer; default 2
+ *   - `reping_interval_business_days`: non-negative integer (0 = no cooldown
+ *     between pings on the same PR — every cron run will re-ping eligible
+ *     PRs, capped only by `max_pings_per_pr`); default 2. PRODUCTION SAFETY:
+ *     setting this to 0 in production is risky; WR-04 adds a runtime warning
+ *     when the loaded value is 0.
  *   - `max_pings_per_pr`: positive integer; default 3
  *
  * Throws `Error` with prefix `stale-check.yml schema:` on any violation. The
