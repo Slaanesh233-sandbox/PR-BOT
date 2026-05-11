@@ -9,7 +9,13 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { handleEvent, type Deps, type HandleEventCtx } from '../src/index.js';
+import {
+  handleEvent,
+  handleStaleCheck,
+  type Deps,
+  type HandleEventCtx,
+} from '../src/index.js';
+import { loadStaleCheckConfig, type StaleCheckConfig } from '../src/lib/index.js';
 
 const SAMPLE_TS = '1700000000.000100'; // FND-06 trailing-zero fixture
 const KAI_SLACK_ID = 'U0B20676JVB';
@@ -19,13 +25,29 @@ interface MockOverrides {
   postMessageResult?: { ok: boolean; ts?: string; error?: string };
   postMessageImpl?: () => Promise<{ ok: boolean; ts?: string; error?: string }>;
   pullsGetBody?: string | null;
-  pullsUpdateImpl?: () => Promise<unknown>;
+  pullsUpdateImpl?: (args: {
+    owner: string;
+    repo: string;
+    pull_number: number;
+    body: string;
+  }) => Promise<unknown>;
   users?: Record<string, string>;
   // Phase 3 additions:
   chatUpdateImpl?: () => Promise<{ ok: boolean; error?: string }>;
   reactionsAddImpl?: () => Promise<{ ok: boolean; error?: string }>;
   // Change B 2026-05-07 (Task 2):
   reactionsRemoveImpl?: () => Promise<{ ok: boolean; error?: string }>;
+  // Phase 3.1 additions:
+  // pulls.list (paginated PR discovery; returns sequential pages by call index)
+  pullsListImpl?: (args: {
+    owner: string;
+    repo: string;
+    state: 'open' | 'closed' | 'all';
+    per_page?: number;
+    page?: number;
+  }) => Promise<{ data: ReadonlyArray<unknown> }>;
+  now?: () => Date;
+  staleCheck?: StaleCheckConfig;
 }
 
 function makeMockDeps(overrides: MockOverrides = {}): {
@@ -42,6 +64,8 @@ function makeMockDeps(overrides: MockOverrides = {}): {
     reactionsAdd: ReturnType<typeof vi.fn>;
     // Change B 2026-05-07 (Task 2):
     reactionsRemove: ReturnType<typeof vi.fn>;
+    // Phase 3.1 spy:
+    pullsList: ReturnType<typeof vi.fn>;
   };
 } {
   const postMessageResult = overrides.postMessageResult ?? { ok: true, ts: SAMPLE_TS };
@@ -64,6 +88,7 @@ function makeMockDeps(overrides: MockOverrides = {}): {
   const chatUpdateImpl = overrides.chatUpdateImpl ?? (async () => ({ ok: true }));
   const reactionsAddImpl = overrides.reactionsAddImpl ?? (async () => ({ ok: true }));
   const reactionsRemoveImpl = overrides.reactionsRemoveImpl ?? (async () => ({ ok: true }));
+  const pullsListImpl = overrides.pullsListImpl ?? (async () => ({ data: [] }));
 
   const postMessage = overrides.postMessageImpl
     ? vi.fn().mockImplementation(overrides.postMessageImpl)
@@ -73,6 +98,7 @@ function makeMockDeps(overrides: MockOverrides = {}): {
   const chatUpdate = vi.fn().mockImplementation(chatUpdateImpl);
   const reactionsAdd = vi.fn().mockImplementation(reactionsAddImpl);
   const reactionsRemove = vi.fn().mockImplementation(reactionsRemoveImpl);
+  const pullsList = vi.fn().mockImplementation(pullsListImpl);
   const info = vi.fn();
   const warning = vi.fn();
   const setFailed = vi.fn();
@@ -83,14 +109,16 @@ function makeMockDeps(overrides: MockOverrides = {}): {
       reactions: { add: reactionsAdd, remove: reactionsRemove },
     } as unknown as Deps['slack'],
     octokit: {
-      rest: { pulls: { get: pullsGet, update: pullsUpdate } },
+      rest: { pulls: { get: pullsGet, update: pullsUpdate, list: pullsList } },
     } as unknown as Deps['octokit'],
     config: {
       users: { users },
       channel: { channel: SANDBOX_CHANNEL_ID },
+      staleCheck: overrides.staleCheck,
     },
     logger: { info, warning, setFailed },
     sleep: async () => {}, // fast-forward retry delays in tests
+    now: overrides.now,
   };
 
   return {
@@ -105,6 +133,7 @@ function makeMockDeps(overrides: MockOverrides = {}): {
       chatUpdate,
       reactionsAdd,
       reactionsRemove,
+      pullsList,
     },
   };
 }
@@ -1212,5 +1241,626 @@ describe('handleEvent — FLT-02 + THRD-07 ALSO apply on terminal events', () =>
     expect(spies.postMessage).not.toHaveBeenCalled();
     expect(spies.reactionsAdd).not.toHaveBeenCalled();
     expect(spies.chatUpdate).not.toHaveBeenCalled();
+  });
+});
+
+// =============================================================================
+// Phase 3.1 — handleStaleCheck (schedule-event dispatcher; STALE-01)
+// =============================================================================
+//
+// Decision A (per Plan 03.1-02): handleStaleCheck is a separate exported entry
+// point that the bootstrap calls when context.eventName === 'schedule'. Tests
+// drive it directly with deps + ctx so the 9-step filter chain + ping side
+// effect are exercised in isolation from main()'s YAML-loading boilerplate.
+//
+// Fixed test "today" = 2026-05-14T14:00:00Z (Thursday). The injected
+// staleCheckConfig sets defaults (3/30/2/3) with an empty holiday list except
+// where a specific test substitutes a list that includes today.
+//
+// The pr.created_at fixtures are designed so businessDaysBetween produces the
+// boundary value each test wants:
+//   - 2026-05-11 (Mon) → 3 business days vs today (Mon, Tue, Wed) = stale
+//   - 2026-05-12 (Tue) → 2 business days = too young (default threshold 3)
+//   - 2026-05-13 (Wed) → 1 business day = too young
+//   - 2026-04-13 (Mon, 31 calendar days ago) → too old at MAX_AGE_DAYS=30
+
+const STALE_TODAY = new Date('2026-05-14T14:00:00Z');
+const STALE_TODAY_ISO = '2026-05-14';
+const fixedNow = (): Date => STALE_TODAY;
+
+const STALE_CFG_DEFAULT: StaleCheckConfig = {
+  holidays: [],
+  staleThresholdBusinessDays: 3,
+  maxAgeDays: 30,
+  repingIntervalBusinessDays: 2,
+  maxPingsPerPr: 3,
+};
+
+const SANDBOX_REPO_CTX: HandleEventCtx = {
+  event: {
+    name: 'schedule',
+    payload: {},
+    repo: { owner: 'Slaanesh233-sandbox', repo: 'sandbox-repo-a' },
+  },
+};
+
+interface FakePrOpts {
+  number?: number;
+  body?: string | null;
+  draft?: boolean;
+  authorLogin?: string;
+  authorType?: string;
+  reviewerLogins?: readonly string[];
+  createdAtISO?: string; // full ISO timestamp; defaults to stale
+  htmlUrl?: string;
+}
+
+interface FakePr {
+  number: number;
+  html_url: string;
+  body: string | null;
+  draft: boolean;
+  user: { login: string; type: string } | null;
+  requested_reviewers: ReadonlyArray<{ login: string }> | null;
+  created_at: string;
+}
+
+function fakePr(opts: FakePrOpts = {}): FakePr {
+  const number = opts.number ?? 7;
+  // Default: PR opened on Monday 2026-05-11 → 3 business days vs Thursday "today" = stale enough.
+  const createdAt = opts.createdAtISO ?? '2026-05-11T09:00:00Z';
+  const authorLogin = opts.authorLogin ?? 'kai';
+  const authorType = opts.authorType ?? 'User';
+  const reviewerLogins = opts.reviewerLogins ?? [];
+  const body = opts.body !== undefined ? opts.body : `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+  return {
+    number,
+    html_url:
+      opts.htmlUrl ?? `https://github.com/Slaanesh233-sandbox/sandbox-repo-a/pull/${number}`,
+    body,
+    draft: opts.draft ?? false,
+    user: { login: authorLogin, type: authorType },
+    requested_reviewers: reviewerLogins.map((login) => ({ login })),
+    created_at: createdAt,
+  };
+}
+
+/** Build a pulls.list mock that returns the given PRs as a single page. */
+function singlePagePullsList(prs: ReadonlyArray<FakePr>): MockOverrides['pullsListImpl'] {
+  return async () => ({ data: prs });
+}
+
+describe('handleStaleCheck — empty open-PRs list', () => {
+  it('zero PRs → no postMessage, pulls.list called once, info log mentions 0 PRs', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.pullsList).toHaveBeenCalledTimes(1);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.pullsUpdate).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/0 open PRs|stale-check: 0/));
+  });
+});
+
+describe('handleStaleCheck — three eligible PRs (happy path bulk)', () => {
+  it('3 eligible PRs → 3 postMessage calls + 3 pulls.update calls with both stale markers', async () => {
+    const prs = [
+      fakePr({ number: 11, reviewerLogins: ['reviewer'] }),
+      fakePr({ number: 12, reviewerLogins: ['reviewer'] }),
+      fakePr({ number: 13, reviewerLogins: ['reviewer'] }),
+    ];
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList(prs),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(3);
+    expect(spies.pullsUpdate).toHaveBeenCalledTimes(3);
+    for (let i = 0; i < 3; i++) {
+      const updateArgs = spies.pullsUpdate.mock.calls[i]![0] as { body: string };
+      expect(updateArgs.body).toContain(`<!-- pr-bot:stale_pinged_at=${STALE_TODAY_ISO} -->`);
+      expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=1 -->');
+    }
+  });
+});
+
+describe('handleStaleCheck — filter step 1: thread_ts marker required', () => {
+  it('PR with empty body → skipped with reason no-marker; no postMessage', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 7, body: '' })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.pullsUpdate).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/no-marker.*#7|#7.*no-marker/));
+  });
+});
+
+describe('handleStaleCheck — filter step 2: silent marker', () => {
+  it('PR with thread_ts AND silent marker → skipped with reason silent-marker', async () => {
+    const body = `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n<!-- pr-bot:silent -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 8, body })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/silent-marker/));
+  });
+});
+
+describe('handleStaleCheck — filter step 3: draft', () => {
+  it('PR.draft=true → skipped with reason draft', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 9, draft: true })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/skipped: draft/));
+  });
+});
+
+describe('handleStaleCheck — filter step 4: bot author (FLT-01 parity)', () => {
+  it("PR.user.type='Bot' → skipped with reason bot-author", async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 21, authorLogin: 'some-bot', authorType: 'Bot' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/bot-author/));
+  });
+
+  it("login ending [bot] with type='User' → skipped (D-04 belt-and-braces parity)", async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 22, authorLogin: 'dependabot[bot]', authorType: 'User' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/bot-author/));
+  });
+});
+
+describe('handleStaleCheck — filter step 5: max age (calendar days)', () => {
+  it('created 31 calendar days ago → skipped with reason too-old', async () => {
+    // 2026-04-13 is 31 days before 2026-05-14
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 31, createdAtISO: '2026-04-13T09:00:00Z' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/too-old/));
+  });
+
+  it('created 29 calendar days ago (within MAX_AGE_DAYS=30) → still considered (not too-old)', async () => {
+    // 2026-04-15 → 29 days before 2026-05-14. Should pass step 5 (will likely
+    // also pass other filters depending on weekday/business-day arithmetic).
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 32, createdAtISO: '2026-04-15T09:00:00Z' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    // 29-day-old PR with thread_ts and no other markers → eligible → ping fires.
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.info).not.toHaveBeenCalledWith(expect.stringMatching(/too-old/));
+  });
+});
+
+describe('handleStaleCheck — filter step 6: too young (business days)', () => {
+  it('created Tuesday (2 business days vs today Thu) → skipped with reason too-young', async () => {
+    // 2026-05-12 is Tue. businessDaysBetween('2026-05-12','2026-05-14',[]) === 2 (Tue, Wed). 2<3.
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 41, createdAtISO: '2026-05-12T09:00:00Z' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/too-young/));
+  });
+
+  it('exactly STALE_THRESHOLD_BUSINESS_DAYS old (3 business days) → eligible (boundary)', async () => {
+    // 2026-05-11 (Mon) → businessDaysBetween('2026-05-11','2026-05-14',[]) === 3 (Mon,Tue,Wed).
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 42, createdAtISO: '2026-05-11T09:00:00Z' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    expect(spies.info).not.toHaveBeenCalledWith(expect.stringMatching(/too-young/));
+  });
+});
+
+describe('handleStaleCheck — filter step 7: reping cooldown', () => {
+  it('stale_pinged_at = yesterday (1 business day, < REPING_INTERVAL=2) → reping-cooldown', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-13 -->\n` +
+      `<!-- pr-bot:stale_ping_count=1 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 51, body })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/reping-cooldown/));
+  });
+
+  it('stale_pinged_at from 3 business days ago (Mon) → eligible; ping fires with count=2', async () => {
+    // last_pinged='2026-05-11' (Mon), today='2026-05-14' (Thu) → businessDaysBetween=3 >= 2 → cleared.
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-11 -->\n` +
+      `<!-- pr-bot:stale_ping_count=1 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 52, body })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain(`<!-- pr-bot:stale_pinged_at=${STALE_TODAY_ISO} -->`);
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=2 -->');
+  });
+});
+
+describe('handleStaleCheck — filter step 8: today is a holiday', () => {
+  it('todayISO in holidays list → entire run skipped, pulls.list NOT called', async () => {
+    const cfg: StaleCheckConfig = { ...STALE_CFG_DEFAULT, holidays: [STALE_TODAY_ISO] };
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: cfg,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 61 })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.pullsList).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/holiday/));
+  });
+});
+
+describe('handleStaleCheck — filter step 9: max pings reached', () => {
+  it('stale_ping_count=3 (== MAX_PINGS_PER_PR) → max-pings-reached', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-09 -->\n` +
+      `<!-- pr-bot:stale_ping_count=3 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 71, body })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/max-pings-reached/));
+  });
+
+  it('stale_ping_count=2 (one remaining) → eligible; new count=3', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-09 -->\n` +
+      `<!-- pr-bot:stale_ping_count=2 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 72, body })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=3 -->');
+  });
+});
+
+describe('handleStaleCheck — happy path ping copy', () => {
+  it('eligible PR → postMessage text contains literal envelope emoji + "3 business days" + author mention', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 81, reviewerLogins: ['reviewer'] }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const args = spies.postMessage.mock.calls[0]![0] as {
+      channel: string;
+      thread_ts: string;
+      text: string;
+      blocks: unknown;
+    };
+    expect(args.channel).toBe(SANDBOX_CHANNEL_ID);
+    expect(args.thread_ts).toBe(SAMPLE_TS);
+    expect(args.text).toContain('this PR has been open for');
+    expect(args.text).toContain('3 business days');
+    expect(args.text).toContain(`<@${KAI_SLACK_ID}>`); // author and reviewer both map to KAI_SLACK_ID
+    expect(args.blocks).toBeDefined();
+  });
+
+  it('zero reviewers → "cc <@author>" without trailing reviewer mentions (Decision 2 zero-reviewer edge case)', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 82, reviewerLogins: [] })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toBe(
+      `📬 this PR has been open for 3 business days.\n  cc <@${KAI_SLACK_ID}>`,
+    );
+  });
+
+  it('two reviewers → both reviewer mentions appear after author mention in cc clause', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 83, reviewerLogins: ['r1', 'r2'] }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    // All three users map to KAI_SLACK_ID via the default users map
+    expect(args.text).toBe(
+      `📬 this PR has been open for 3 business days.\n  cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>`,
+    );
+  });
+
+  it('unmapped reviewer → @<login> fallback text + warning for that login', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      users: { kai: KAI_SLACK_ID }, // reviewer 'mystery' deliberately absent
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 84, reviewerLogins: ['mystery'] }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const args = spies.postMessage.mock.calls[0]![0] as { text: string };
+    expect(args.text).toContain('@mystery');
+    expect(spies.warning).toHaveBeenCalledWith(
+      expect.stringMatching(/no Slack ID mapping for github login "mystery"/),
+    );
+  });
+});
+
+describe('handleStaleCheck — error paths', () => {
+  it("chat.postMessage 'not_in_channel' → setFailed; pulls.update NOT called; later PRs still attempted", async () => {
+    // 2 PRs; the FIRST chat.postMessage throws not_in_channel, the second succeeds.
+    let postCount = 0;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 91 }),
+        fakePr({ number: 92 }),
+      ]),
+      postMessageImpl: async () => {
+        postCount++;
+        if (postCount === 1) throw new Error('not_in_channel');
+        return { ok: true, ts: SAMPLE_TS };
+      },
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(2);
+    expect(spies.pullsUpdate).toHaveBeenCalledTimes(1); // only the second PR's PATCH
+    expect(spies.setFailed).toHaveBeenCalledWith(expect.stringMatching(/not_in_channel|invite/));
+  });
+
+  it("chat.postMessage 'missing_scope' → setFailed; pulls.update NOT called for that PR", async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 93 })]),
+      postMessageImpl: async () => {
+        throw new Error('missing_scope');
+      },
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.setFailed).toHaveBeenCalledTimes(1);
+    expect(spies.pullsUpdate).not.toHaveBeenCalled();
+  });
+
+  it("chat.postMessage returns ok:false 'rate_limited' → setFailed; pulls.update NOT called; subsequent PRs continue", async () => {
+    // The existing postThreadReply tier-maps !ok via setFailed regardless of code;
+    // stale-check inherits that contract.
+    let count = 0;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 94 }),
+        fakePr({ number: 95 }),
+      ]),
+      postMessageImpl: async () => {
+        count++;
+        if (count === 1) return { ok: false, error: 'rate_limited' };
+        return { ok: true, ts: SAMPLE_TS };
+      },
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(2);
+    expect(spies.pullsUpdate).toHaveBeenCalledTimes(1); // only the second PR
+    expect(spies.setFailed).toHaveBeenCalledWith(expect.stringMatching(/rate_limited|!ok/));
+  });
+
+  it('pulls.update transient 503 → retry succeeds on second attempt; warning logged', async () => {
+    let count = 0;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 96 })]),
+      pullsUpdateImpl: async () => {
+        count++;
+        if (count === 1) {
+          const err: Error & { status?: number } = new Error('Service Unavailable');
+          err.status = 503;
+          throw err;
+        }
+        return { data: {} };
+      },
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.pullsUpdate).toHaveBeenCalledTimes(2);
+    expect(spies.warning).toHaveBeenCalled();
+    expect(spies.setFailed).not.toHaveBeenCalled();
+  });
+
+  it('pulls.update 403 → setFailed for that PR; subsequent PRs continue', async () => {
+    let count = 0;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 97 }),
+        fakePr({ number: 98 }),
+      ]),
+      pullsUpdateImpl: async () => {
+        count++;
+        if (count === 1) {
+          const err: Error & { status?: number } = new Error('Forbidden');
+          err.status = 403;
+          throw err;
+        }
+        return { data: {} };
+      },
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(2);
+    expect(spies.pullsUpdate).toHaveBeenCalledTimes(2);
+    expect(spies.setFailed).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('handleStaleCheck — stale_ping_count increment semantics', () => {
+  it('no count marker present → new body has stale_ping_count=1', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 101 })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=1 -->');
+  });
+
+  it('count marker present (=1) → replace-in-place to =2', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-09 -->\n` +
+      `<!-- pr-bot:stale_ping_count=1 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 102, body })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=2 -->');
+    expect(updateArgs.body).not.toContain('<!-- pr-bot:stale_ping_count=1 -->');
+  });
+
+  it('count marker present but garbage (NaN) → treated as 0; new value is 1', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_ping_count=garbage -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 103, body })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=1 -->');
+    expect(updateArgs.body).not.toContain('<!-- pr-bot:stale_ping_count=garbage -->');
+  });
+});
+
+describe('handleStaleCheck — pulls.list pagination', () => {
+  it('100 items on page 1 + 10 on page 2 → both pages processed; page-2 PRs ping if eligible', async () => {
+    // Build 100 PRs for page 1 and 10 PRs for page 2 (all eligible).
+    const buildPage = (start: number, count: number): FakePr[] =>
+      Array.from({ length: count }, (_, i) =>
+        fakePr({ number: start + i, reviewerLogins: ['reviewer'] }),
+      );
+    const page1 = buildPage(1000, 100);
+    const page2 = buildPage(2000, 10);
+    let callIndex = 0;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: async () => {
+        callIndex++;
+        if (callIndex === 1) return { data: page1 };
+        if (callIndex === 2) return { data: page2 };
+        return { data: [] };
+      },
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.pullsList).toHaveBeenCalledTimes(2);
+    expect(spies.postMessage).toHaveBeenCalledTimes(110);
+    // Confirm at least one page-2 PR (number >= 2000) was processed.
+    const calledNumbers = spies.pullsUpdate.mock.calls.map(
+      (call) => (call[0] as { pull_number: number }).pull_number,
+    );
+    expect(calledNumbers.some((n) => n >= 2000)).toBe(true);
+  });
+});
+
+describe('handleStaleCheck — defensive: missing stale-check config', () => {
+  it('deps.config.staleCheck === undefined → setFailed mentions stale-check.yml; no pulls.list', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      // staleCheck deliberately omitted (undefined)
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.setFailed).toHaveBeenCalledWith(expect.stringMatching(/stale-check\.yml/i));
+    expect(spies.pullsList).not.toHaveBeenCalled();
+    expect(spies.postMessage).not.toHaveBeenCalled();
+  });
+});
+
+// Sanity check that the on-disk config still parses (parity with the
+// config-schema test, but exercised here so tests/handler.test.ts test budget
+// remains coherent).
+describe('handleStaleCheck — on-disk config integration', () => {
+  it('loadStaleCheckConfig(yaml) returns 12 holidays + 4 locked thresholds (parity check)', () => {
+    const cfg = loadStaleCheckConfig(
+      'stale_threshold_business_days: 3\nmax_age_days: 30\nreping_interval_business_days: 2\nmax_pings_per_pr: 3\nholidays:\n  - 2026-05-25\n',
+    );
+    expect(cfg.staleThresholdBusinessDays).toBe(3);
+    expect(cfg.maxAgeDays).toBe(30);
+    expect(cfg.repingIntervalBusinessDays).toBe(2);
+    expect(cfg.maxPingsPerPr).toBe(3);
+    expect(cfg.holidays).toContain('2026-05-25');
   });
 });
