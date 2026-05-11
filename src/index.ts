@@ -1114,16 +1114,26 @@ async function processOnePrForStaleCheck(
     return;
   }
 
-  // Filter step 5: too old (calendar days).
+  // Filter step 5: too old (calendar days). WR-05 — reject malformed
+  // pr.created_at up front with a structured warning so the subsequent
+  // businessDaysBetween call never receives garbage. Previously the
+  // Number.isFinite guard silently dropped the too-old check and fell
+  // through to step 6 with `pr.created_at.slice(0, 10)` on a non-ISO
+  // string, which threw RangeError from parseIsoDateToUtcMs and was
+  // only caught by the WR-01 outer try/catch (no PR-specific log).
   const createdAtMs = new Date(pr.created_at).getTime();
-  if (Number.isFinite(createdAtMs)) {
-    const ageDays = (now.getTime() - createdAtMs) / (24 * 60 * 60 * 1000);
-    if (ageDays > cfg.maxAgeDays) {
-      deps.logger.info(
-        `stale-check skipped: too-old (PR #${prNumber}, age=${Math.round(ageDays)}d)`,
-      );
-      return;
-    }
+  if (!Number.isFinite(createdAtMs)) {
+    deps.logger.warning(
+      `stale-check skipped: malformed-created_at (PR #${prNumber}, raw="${pr.created_at}")`,
+    );
+    return;
+  }
+  const ageDays = (now.getTime() - createdAtMs) / (24 * 60 * 60 * 1000);
+  if (ageDays > cfg.maxAgeDays) {
+    deps.logger.info(
+      `stale-check skipped: too-old (PR #${prNumber}, age=${Math.round(ageDays)}d)`,
+    );
+    return;
   }
 
   // Filter step 6: too young (business days).
