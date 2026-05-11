@@ -206,10 +206,14 @@ export function formatCloseReply(args: { readonly closerMention: ResolvedMention
  * `mentions.ts`. Both mapped and fallback mentions flow through unchanged
  * (mapped: real Slack ping; fallback: plain @login that does not ping).
  *
- * Throws RangeError for businessDaysOpen < 1 or non-integer (parity with
- * formatPrCommentReply / formatReviewCommentReply existing range-checks).
- * The dispatcher in Plan 03.1-02 will never pass N < 3 (the staleness
- * threshold) but the formatter is defensive.
+ * Throws RangeError for businessDaysOpen < 0 or non-integer.
+ *
+ * Note on the lower bound: unlike formatPrCommentReply / formatReviewCommentReply
+ * (which floor at 1 because "0 comments" is semantically nonsense), the
+ * business-day count is meaningfully zero — a PR that just opened today and
+ * meets every other eligibility test renders as "open for 0 business days."
+ * The Phase 3.1 keystone S3 (eligible-fires on a same-day PR via Option-B
+ * config override) exercises this case live.
  *
  * STAT-01 re-lock 2026-05-08 invariant: the stale-ping is a THREAD REPLY only.
  * This formatter emits TEXT only — there is no reactions-related primitive
@@ -220,9 +224,9 @@ export function formatStalePingReply(args: {
   readonly authorMention: ResolvedMention;
   readonly reviewerMentions: readonly ResolvedMention[];
 }): string {
-  if (!Number.isInteger(args.businessDaysOpen) || args.businessDaysOpen < 1) {
+  if (!Number.isInteger(args.businessDaysOpen) || args.businessDaysOpen < 0) {
     throw new RangeError(
-      `formatStalePingReply: businessDaysOpen must be a positive integer, got ${args.businessDaysOpen}`,
+      `formatStalePingReply: businessDaysOpen must be a non-negative integer, got ${args.businessDaysOpen}`,
     );
   }
   const ccTexts = [args.authorMention.text, ...args.reviewerMentions.map((m) => m.text)].join(' ');

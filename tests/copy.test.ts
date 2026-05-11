@@ -250,14 +250,24 @@ describe('formatStalePingReply (STALE-01 — locked copy 2026-05-08, CONTEXT.md 
     ).toContain('8 business days');
   });
 
-  it('throws RangeError on N=0', () => {
-    expect(() =>
+  it('renders N=0 ("0 business days" — same-day eligible PR via Option-B override; Plan 03.1-03 S3)', () => {
+    expect(
       formatStalePingReply({
         businessDaysOpen: 0,
         authorMention: mapped('<@UAuth>'),
         reviewerMentions: [],
       }),
-    ).toThrow(RangeError);
+    ).toBe('📬 this PR has been open for 0 business days.\n  cc <@UAuth>');
+  });
+
+  it('throws RangeError on N=-1 (negative integer)', () => {
+    expect(() =>
+      formatStalePingReply({
+        businessDaysOpen: -1,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [],
+      }),
+    ).toThrow(/non-negative integer/);
   });
 
   it('throws RangeError on non-integer N (3.5, NaN)', () => {
