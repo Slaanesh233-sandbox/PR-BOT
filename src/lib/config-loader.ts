@@ -136,6 +136,27 @@ function requirePositiveInteger(field: string, value: unknown): number {
   return value;
 }
 
+// Non-negative-integer variant. Semantically zero is a valid setting for
+// stale_threshold_business_days (treat every eligible PR as stale on day 0)
+// and reping_interval_business_days (no cooldown between pings). Both fields
+// are configured numerically — 0 is meaningful, not a sentinel for "absent".
+// The Phase 3.1 keystone (Plan 03.1-03 M5 → M10 Option-B override window)
+// relies on this — without it, the keystone cannot exercise S3 (eligible-fires)
+// on a same-day PR, since GitHub does not allow backdating created_at.
+function requireNonNegativeInteger(field: string, value: unknown): number {
+  if (typeof value !== 'number') {
+    throw new Error(
+      `stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`,
+    );
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(
+      `stale-check.yml schema: ${field} must be a non-negative integer, got ${value}`,
+    );
+  }
+  return value;
+}
+
 /**
  * Parse + validate a `config/stale-check.yml` text. Phase 3.1 STALE-01.
  *
@@ -206,7 +227,10 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
   const staleThresholdBusinessDays =
     root.stale_threshold_business_days === undefined
       ? STALE_CHECK_DEFAULTS.staleThresholdBusinessDays
-      : requirePositiveInteger('stale_threshold_business_days', root.stale_threshold_business_days);
+      : requireNonNegativeInteger(
+          'stale_threshold_business_days',
+          root.stale_threshold_business_days,
+        );
 
   const maxAgeDays =
     root.max_age_days === undefined
@@ -216,7 +240,10 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
   const repingIntervalBusinessDays =
     root.reping_interval_business_days === undefined
       ? STALE_CHECK_DEFAULTS.repingIntervalBusinessDays
-      : requirePositiveInteger('reping_interval_business_days', root.reping_interval_business_days);
+      : requireNonNegativeInteger(
+          'reping_interval_business_days',
+          root.reping_interval_business_days,
+        );
 
   const maxPingsPerPr =
     root.max_pings_per_pr === undefined

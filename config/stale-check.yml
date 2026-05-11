@@ -1,3 +1,10 @@
+# !!! TEMPORARY OPTION-B OVERRIDE FOR PHASE 3.1 KEYSTONE — REVERTED IN M10 !!!
+# This file is in a non-canonical state for the duration of the keystone run.
+# stale_threshold_business_days and reping_interval_business_days have been
+# zeroed so the keystone can exercise Scenario S3 (eligible-fires) on a
+# same-day PR. After M6 (S3) succeeds, M10 reverts this file back to the v1
+# locked defaults (3 / 30 / 2 / 3).
+#
 # Stale-check config — Phase 3.1 STALE-01.
 #
 # Schema validated by tests/config-schema.test.ts via loadStaleCheckConfig.
@@ -11,9 +18,9 @@
 # v1 holiday list = US federal holidays for the next ~12 months from
 # 2026-05-08 (CONTEXT.md Decision 1).
 
-stale_threshold_business_days: 3
+stale_threshold_business_days: 0
 max_age_days: 30
-reping_interval_business_days: 2
+reping_interval_business_days: 0
 max_pings_per_pr: 3
 holidays:
   - 2026-05-25 # Memorial Day
