@@ -52954,8 +52954,9 @@ var __webpack_exports__ = {};
 
 // EXPORTS
 __nccwpck_require__.d(__webpack_exports__, {
-  N: () => (/* binding */ handleEvent),
-  i: () => (/* binding */ main)
+  N6: () => (/* binding */ handleEvent),
+  _e: () => (/* binding */ handleStaleCheck),
+  iW: () => (/* binding */ main)
 });
 
 // EXTERNAL MODULE: external "node:fs"
@@ -60309,6 +60310,89 @@ const SILENT_MARKER = '<!-- pr-bot:silent -->';
 function isSilent(body) {
     return body.includes(SILENT_MARKER);
 }
+// === Phase 3.1 — stale-PR marker shapes (parallel to Phase-1 thread_ts) =====
+//
+// Two new marker shapes ride on the same `<!-- pr-bot:<token>=<value> -->`
+// convention as the Phase-1 thread_ts marker. Same idempotency invariants
+// (D-02 / FND-06): values are STRINGS end-to-end; serialize/parse round-trip
+// preserves byte equality; inject is idempotent on same value and
+// replace-in-place on different.
+//
+//   - stale_pinged_at: ISO-8601 date (YYYY-MM-DD), no time / timezone. Keeps
+//     the marker idempotent across runners (no DST footgun inside the marker
+//     itself; the surrounding businessDaysBetween helper already handles DST
+//     via UTC midnight interpretation).
+//
+//   - stale_ping_count: positive-integer STRING (e.g. '1', '2', '3'). The
+//     dispatcher in Plan 03.1-02 parses this to an integer ONCE at the
+//     comparison site against MAX_PINGS_PER_PR (via parseInt(., 10), with
+//     NaN -> 0 fallback for paranoia). Inside this module the count is an
+//     opaque text token — D-02 / FND-06 parity with thread_ts. No float
+//     coercion anywhere in this file (the forbidden-coercion grep gate
+//     enforces this on every CI run).
+//
+// FLT-02 / Pitfall 17 parity: regex matching is whitespace-tolerant inside
+// the comment (same `\s*` pattern as MARKER_REGEX) but token-strict — the
+// `stale_pinged_at` / `stale_ping_count` substrings are case-sensitive.
+/**
+ * Matches `<!-- pr-bot:stale_pinged_at=<DATE> -->` (with optional surrounding
+ * whitespace inside the comment). Non-greedy `\S+?` capture; no `g` flag.
+ */
+const STALE_PINGED_AT_REGEX = /<!--\s*pr-bot:stale_pinged_at=(\S+?)\s*-->/;
+/**
+ * Matches `<!-- pr-bot:stale_ping_count=<N> -->` (same shape). Non-greedy
+ * `\S+?` capture; no `g` flag.
+ */
+const STALE_PING_COUNT_REGEX = /<!--\s*pr-bot:stale_ping_count=(\S+?)\s*-->/;
+/** Extract the embedded `stale_pinged_at` ISO date. Returns `null` if absent. */
+function parseStalePingedAt(body) {
+    const m = body.match(STALE_PINGED_AT_REGEX);
+    return m && m[1] !== undefined ? m[1] : null;
+}
+/** Render a stale_pinged_at marker. Output: `<!-- pr-bot:stale_pinged_at=${date} -->`. */
+function serializeStalePingedAt(date) {
+    return `<!-- pr-bot:stale_pinged_at=${date} -->`;
+}
+/**
+ * Idempotent marker write — same semantics as Phase-1 `inject`:
+ *   - same value already present → return body unchanged
+ *   - different value present    → replace in place
+ *   - no marker present          → append with `\n\n` separator
+ */
+function injectStalePingedAt(body, date) {
+    if (STALE_PINGED_AT_REGEX.test(body)) {
+        const existing = parseStalePingedAt(body);
+        if (existing === date)
+            return body;
+        return body.replace(STALE_PINGED_AT_REGEX, serializeStalePingedAt(date));
+    }
+    if (body.length === 0)
+        return serializeStalePingedAt(date);
+    const sep = body.endsWith('\n\n') ? '' : body.endsWith('\n') ? '\n' : '\n\n';
+    return `${body}${sep}${serializeStalePingedAt(date)}`;
+}
+/** Extract the embedded `stale_ping_count` integer-string. Returns `null` if absent. */
+function parseStalePingCount(body) {
+    const m = body.match(STALE_PING_COUNT_REGEX);
+    return m && m[1] !== undefined ? m[1] : null;
+}
+/** Render a stale_ping_count marker. Output: `<!-- pr-bot:stale_ping_count=${count} -->`. */
+function serializeStalePingCount(count) {
+    return `<!-- pr-bot:stale_ping_count=${count} -->`;
+}
+/** Idempotent marker write — same semantics as `injectStalePingedAt`. */
+function injectStalePingCount(body, count) {
+    if (STALE_PING_COUNT_REGEX.test(body)) {
+        const existing = parseStalePingCount(body);
+        if (existing === count)
+            return body;
+        return body.replace(STALE_PING_COUNT_REGEX, serializeStalePingCount(count));
+    }
+    if (body.length === 0)
+        return serializeStalePingCount(count);
+    const sep = body.endsWith('\n\n') ? '' : body.endsWith('\n') ? '\n' : '\n\n';
+    return `${body}${sep}${serializeStalePingCount(count)}`;
+}
 
 ;// CONCATENATED MODULE: ./src/lib/mentions.ts
 // Mentions module — the SOLE producer of Slack `<@U…>` user-mention syntax in this codebase
@@ -60543,6 +60627,47 @@ function formatMergeReply(args) {
 /** THRD-05 close-without-merge thread reply (actor-first, locked spec 2026-05-07). */
 function formatCloseReply(args) {
     return `:no_entry_sign: ${args.closerMention.text} closed the pull request`;
+}
+/**
+ * STALE-01 stale-ping thread reply (CONTEXT.md Decision 2 — locked 2026-05-08).
+ *
+ * Locked copy (rendered values shown by intent, not by literal syntax — the
+ * comment-token convention from Plans 01-03a / 01-03b / 02-02 keeps the
+ * FLT-05 angle-bracket-at-U substring out of every file except mentions.ts):
+ *
+ *   line 1: 📬 this PR has been open for {N} business days.
+ *   line 2: (two spaces) cc {author-mention} {reviewer1-mention} {reviewer2-mention} ...
+ *
+ * The leading 📬 emoji is a literal char (U+1F4EC), distinguishing stale-pings
+ * from review thread replies (':thumbsup:' / ':ok_hand:' / ':warning:') and
+ * terminal events (':tada:' / ':no_entry_sign:'). The newline + two-space
+ * indent before 'cc' is exactly '\n  ' — same pattern as buildRootMessage's
+ * OPEN-04 cc clause.
+ *
+ * Author is ALWAYS rendered, even when reviewerMentions is empty (zero-
+ * reviewer edge case from CONTEXT.md Decision 2: cc {author-mention} alone —
+ * the author at least learns their PR is stale and can find a reviewer).
+ *
+ * The formatter takes ALREADY-RESOLVED ResolvedMention objects and uses .text
+ * only — FLT-05 invariant. Mention-syntax construction lives only in
+ * `mentions.ts`. Both mapped and fallback mentions flow through unchanged
+ * (mapped: real Slack ping; fallback: plain @login that does not ping).
+ *
+ * Throws RangeError for businessDaysOpen < 1 or non-integer (parity with
+ * formatPrCommentReply / formatReviewCommentReply existing range-checks).
+ * The dispatcher in Plan 03.1-02 will never pass N < 3 (the staleness
+ * threshold) but the formatter is defensive.
+ *
+ * STAT-01 re-lock 2026-05-08 invariant: the stale-ping is a THREAD REPLY only.
+ * This formatter emits TEXT only — there is no reactions-related primitive
+ * that a dispatcher could mistake for a root-message reaction trigger.
+ */
+function formatStalePingReply(args) {
+    if (!Number.isInteger(args.businessDaysOpen) || args.businessDaysOpen < 1) {
+        throw new RangeError(`formatStalePingReply: businessDaysOpen must be a positive integer, got ${args.businessDaysOpen}`);
+    }
+    const ccTexts = [args.authorMention.text, ...args.reviewerMentions.map((m) => m.text)].join(' ');
+    return `📬 this PR has been open for ${args.businessDaysOpen} business days.\n  cc ${ccTexts}`;
 }
 
 ;// CONCATENATED MODULE: ./src/lib/blocks.ts
@@ -60978,6 +61103,222 @@ function loadChannelConfig(yamlText) {
     }
     return { channel: root.channel };
 }
+// === Phase 3.1 — stale-check config loader (STALE-01) =======================
+//
+// Same pattern as loadUsersMap / loadChannelConfig: parseYaml → typeof checks
+// → schema checks → throw with greppable prefix on violation.
+//
+// Locked defaults from CONTEXT.md "Implementation defaults the planner should
+// ship as-is":
+//   - stale_threshold_business_days = 3
+//   - max_age_days = 30
+//   - reping_interval_business_days = 2
+//   - max_pings_per_pr = 3
+//
+// holidays defaults to [] when absent (the cron's Mon-Fri schedule restriction
+// + business-day filter cover the baseline; admins append company-specific
+// days as needed).
+const STALE_CHECK_DEFAULTS = {
+    holidays: [],
+    staleThresholdBusinessDays: 3,
+    maxAgeDays: 30,
+    repingIntervalBusinessDays: 2,
+    maxPingsPerPr: 3,
+};
+// Strict anchored ISO-8601 date regex. Shared with the marker validator for
+// stale_pinged_at (Plan 03.1-02 import).
+const STALE_CHECK_ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+function requirePositiveInteger(field, value) {
+    if (typeof value !== 'number') {
+        throw new Error(`stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`);
+    }
+    if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`stale-check.yml schema: ${field} must be a positive integer, got ${value}`);
+    }
+    return value;
+}
+/**
+ * Parse + validate a `config/stale-check.yml` text. Phase 3.1 STALE-01.
+ *
+ * Schema:
+ *   - top-level mapping (object); empty/null body allowed (returns all defaults)
+ *   - `holidays`: array of ISO-8601 date strings matching /^\d{4}-\d{2}-\d{2}$/.
+ *     Default: [] (no extra holidays beyond the cron's Mon-Fri restriction).
+ *   - `stale_threshold_business_days`: positive integer; default 3
+ *   - `max_age_days`: positive integer; default 30
+ *   - `reping_interval_business_days`: positive integer; default 2
+ *   - `max_pings_per_pr`: positive integer; default 3
+ *
+ * Throws `Error` with prefix `stale-check.yml schema:` on any violation. The
+ * dispatcher in Plan 03.1-02 catches these and routes through `core.setFailed`
+ * (same D-17 pattern as loadUsersMap / loadChannelConfig).
+ *
+ * Defaults source: CONTEXT.md "Implementation defaults the planner should
+ * ship as-is" section.
+ */
+function loadStaleCheckConfig(yamlText) {
+    const parsed = (0,yaml_dist/* parse */.qg)(yamlText);
+    // Empty / null / undefined YAML → all defaults. Treat the file as an empty
+    // mapping so omitted-key paths below resolve uniformly.
+    if (parsed === null || parsed === undefined) {
+        return STALE_CHECK_DEFAULTS;
+    }
+    if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`stale-check.yml schema: top-level must be a mapping (got ${Array.isArray(parsed) ? 'array' : typeof parsed})`);
+    }
+    const root = parsed;
+    // holidays — array of ISO date strings; default [].
+    let holidays = STALE_CHECK_DEFAULTS.holidays;
+    if (root.holidays !== undefined && root.holidays !== null) {
+        if (!Array.isArray(root.holidays)) {
+            throw new Error(`stale-check.yml schema: holidays must be an array, got ${typeof root.holidays}`);
+        }
+        const out = [];
+        for (let i = 0; i < root.holidays.length; i += 1) {
+            const entry = root.holidays[i];
+            if (typeof entry !== 'string') {
+                throw new Error(`stale-check.yml schema: holidays[${i}] must be a string, got ${typeof entry}`);
+            }
+            if (!STALE_CHECK_ISO_DATE_REGEX.test(entry)) {
+                throw new Error(`stale-check.yml schema: holidays[${i}] ("${entry}") does not match ISO-8601 date regex /^\\d{4}-\\d{2}-\\d{2}$/`);
+            }
+            out.push(entry);
+        }
+        holidays = out;
+    }
+    const staleThresholdBusinessDays = root.stale_threshold_business_days === undefined
+        ? STALE_CHECK_DEFAULTS.staleThresholdBusinessDays
+        : requirePositiveInteger('stale_threshold_business_days', root.stale_threshold_business_days);
+    const maxAgeDays = root.max_age_days === undefined
+        ? STALE_CHECK_DEFAULTS.maxAgeDays
+        : requirePositiveInteger('max_age_days', root.max_age_days);
+    const repingIntervalBusinessDays = root.reping_interval_business_days === undefined
+        ? STALE_CHECK_DEFAULTS.repingIntervalBusinessDays
+        : requirePositiveInteger('reping_interval_business_days', root.reping_interval_business_days);
+    const maxPingsPerPr = root.max_pings_per_pr === undefined
+        ? STALE_CHECK_DEFAULTS.maxPingsPerPr
+        : requirePositiveInteger('max_pings_per_pr', root.max_pings_per_pr);
+    return {
+        holidays,
+        staleThresholdBusinessDays,
+        maxAgeDays,
+        repingIntervalBusinessDays,
+        maxPingsPerPr,
+    };
+}
+
+;// CONCATENATED MODULE: ./src/lib/business-days.ts
+// Business-day arithmetic — pure date helper for the stale-PR reminder cron.
+//
+// STALE-01 + CONTEXT.md Decision 1 + ROADMAP success criteria 3 + 8.
+//
+// Convention contract:
+//   - All dates are ISO-8601 YYYY-MM-DD strings, interpreted as UTC midnight via
+//     `Date.UTC(year, month - 1, day)`. The helper is therefore deterministic
+//     across DST transitions and across runners in different timezones — the
+//     2027-03-14 spring-forward (23-hour day in US ET) and the 2026-11-01
+//     fall-back (25-hour day) cannot cause an off-by-one because the iterator
+//     steps by exactly 86_400_000 ms in UTC, which the DST jumps do not affect.
+//
+//   - businessDaysBetween is RIGHT-EXCLUSIVE: start counted, end excluded.
+//     Example: businessDaysBetween('2026-05-04', '2026-05-08', ∅) === 4 because
+//     we count Mon, Tue, Wed, Thu — Fri is the right-exclusive boundary so the
+//     dispatcher's `>= 3` test fires once the PR has been waiting through 3
+//     business days, on the morning of the 4th.
+//
+//   - Reversed args (end < start) clamp to 0 (no warning emitted; the
+//     dispatcher in Plan 03.1-02 should never call with reversed args, so this
+//     is purely defensive).
+//
+//   - The `holidays` parameter accepts both `ReadonlySet<string>` and
+//     `readonly string[]` — internally normalized to a Set for O(1) lookup.
+//     The loader returns string[]; the dispatcher passes either shape directly.
+//
+//   - Invalid date strings (anything not matching /^\d{4}-\d{2}-\d{2}$/) throw
+//     RangeError with the offending input echoed in the message.
+//
+// FLT-05 invariant: this module emits no Slack mention syntax — it returns
+// only `number` and `boolean`. The angle-bracket-at-U… form is owned by
+// `mentions.ts` alone.
+const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const ONE_DAY_MS = 86_400_000;
+function normalizeHolidays(holidays) {
+    return holidays instanceof Set ? holidays : new Set(holidays);
+}
+function parseIsoDateToUtcMs(date) {
+    if (!ISO_DATE_REGEX.test(date)) {
+        throw new RangeError(`businessDaysBetween: expected YYYY-MM-DD ISO date, got "${date}"`);
+    }
+    // Parts already validated by regex. Use parseInt with explicit radix 10 —
+    // the forbidden-coercion grep (D-02 / FND-06; see invariant section of the
+    // plan) targets the literal float-coercion token AND the bare numeric-cast
+    // token; parseInt with radix 10 is the standard integer parser and trips
+    // neither.
+    const year = parseInt(date.slice(0, 4), 10);
+    const month = parseInt(date.slice(5, 7), 10);
+    const day = parseInt(date.slice(8, 10), 10);
+    const ms = Date.UTC(year, month - 1, day);
+    // Date.UTC tolerates out-of-range fields by overflowing — reject those.
+    // Cheap sanity check: round-trip the parts back through UTCDate accessors.
+    const d = new Date(ms);
+    if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
+        throw new RangeError(`businessDaysBetween: "${date}" is not a real calendar date`);
+    }
+    return ms;
+}
+function utcMsToIsoDate(ms) {
+    const d = new Date(ms);
+    const y = d.getUTCFullYear().toString().padStart(4, '0');
+    const m = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+    const day = d.getUTCDate().toString().padStart(2, '0');
+    return `${y}-${m}-${day}`;
+}
+/**
+ * Returns true iff `date` (YYYY-MM-DD) falls Mon-Fri AND is not present in
+ * the holiday set.
+ *
+ * Throws RangeError on malformed input.
+ */
+function isBusinessDay(date, holidays) {
+    const ms = parseIsoDateToUtcMs(date);
+    const dow = new Date(ms).getUTCDay(); // 0=Sun, 6=Sat
+    if (dow === 0 || dow === 6)
+        return false;
+    const holidaySet = normalizeHolidays(holidays);
+    return !holidaySet.has(date);
+}
+/**
+ * Count the integer number of business days in the half-open interval
+ * [start, end). A business day is a weekday (Mon-Fri) that is NOT in the
+ * holiday set.
+ *
+ * Examples (no holidays):
+ *   - same day → 0
+ *   - Mon → Fri (same week) → 4 (Mon, Tue, Wed, Thu)
+ *   - Fri → following Mon → 1 (Fri counts; Sat+Sun skipped)
+ *
+ * Reversed args clamp to 0. Invalid inputs throw RangeError.
+ *
+ * Both `start` and `end` are interpreted as UTC midnight — see the module
+ * header comment for the DST-immunity rationale.
+ */
+function businessDaysBetween(start, end, holidays) {
+    const startMs = parseIsoDateToUtcMs(start);
+    const endMs = parseIsoDateToUtcMs(end);
+    if (endMs <= startMs)
+        return 0;
+    const holidaySet = normalizeHolidays(holidays);
+    let count = 0;
+    for (let cur = startMs; cur < endMs; cur += ONE_DAY_MS) {
+        const dow = new Date(cur).getUTCDay();
+        if (dow === 0 || dow === 6)
+            continue;
+        if (holidaySet.has(utcMsToIsoDate(cur)))
+            continue;
+        count += 1;
+    }
+    return count;
+}
 
 ;// CONCATENATED MODULE: ./src/lib/index.ts
 // Pure logic library barrel — Phase 1 (composed by Plan 01-03b).
@@ -60989,6 +61330,7 @@ function loadChannelConfig(yamlText) {
 //
 // NodeNext moduleResolution: TypeScript imports use the `.js` extension (the compiled
 // output extension) even when the source file is `.ts`. This is correct ESM behavior.
+
 
 
 
@@ -61619,6 +61961,164 @@ async function patchWithRetry(deps, owner, repo, pull_number, body) {
     deps.logger.setFailed(`pulls.update failed after ${PATCH_RETRY_DELAYS_MS.length} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
     // Note: OBS-04 (Phase 5) will add a visible Slack message when this happens.
 }
+// === Phase 3.1 — schedule-event handler (STALE-01) =========================
+//
+// handleStaleCheck is dispatched by main() when context.eventName === 'schedule'.
+// The webhook event router (handleEvent) is untouched — schedule events do not
+// carry a webhook payload, so the dispatcher takes a different shape (no PR in
+// payload; PRs discovered via octokit.rest.pulls.list).
+//
+// The 9-step filter chain mirrors REQUIREMENTS.md STALE-01 canonical order:
+//   1. thread_ts marker required  (no-marker)
+//   2. silent opt-out             (silent-marker)
+//   3. not draft                  (draft)
+//   4. not bot author             (bot-author)        — FLT-01 parity via isBotActor
+//   5. not too old                (too-old)           — calendar days
+//   6. stale enough               (too-young)         — business days
+//   7. reping cooldown elapsed    (reping-cooldown)   — business days since last ping
+//   8. today not a holiday        (holiday)           — checked once at run start
+//   9. ping budget remaining      (max-pings-reached)
+//
+// Eligible PRs receive a thread-reply ping + PR-body PATCH (stale_pinged_at +
+// stale_ping_count markers). Failures on one PR do not abort the loop — each
+// PR is independent. STAT-01 re-lock invariant: handleStaleCheck does NOT call
+// the Slack reaction-add or reaction-remove APIs (the new code path is
+// reaction-free; root reactions remain reserved for terminal-state events).
+const PULLS_LIST_PAGE_SIZE = 100;
+async function handleStaleCheck(deps, ctx) {
+    const cfg = deps.config.staleCheck;
+    if (!cfg) {
+        deps.logger.setFailed('handleStaleCheck: deps.config.staleCheck not loaded (config/stale-check.yml — see Plan 03.1-01)');
+        return;
+    }
+    const eventRepo = ctx?.event.repo ?? deps.repo;
+    if (!eventRepo) {
+        deps.logger.setFailed('handleStaleCheck: no owner/repo available (provide ctx.event.repo or deps.repo)');
+        return;
+    }
+    const { owner, repo } = eventRepo;
+    const now = (deps.now ?? (() => new Date()))();
+    const todayISO = now.toISOString().slice(0, 10);
+    const holidaysSet = new Set(cfg.holidays);
+    // Filter step 8 — short-circuits the WHOLE run before any I/O when today
+    // itself is a holiday (extra safety guard beyond the cron's Mon-Fri pattern).
+    if (holidaysSet.has(todayISO)) {
+        deps.logger.info(`stale-check: today (${todayISO}) is a holiday; entire run skipped`);
+        return;
+    }
+    // Discover candidate PRs via paginated pulls.list.
+    const allPrs = [];
+    let page = 1;
+    while (true) {
+        let resp;
+        try {
+            resp = await deps.octokit.rest.pulls.list({
+                owner,
+                repo,
+                state: 'open',
+                per_page: PULLS_LIST_PAGE_SIZE,
+                page,
+            });
+        }
+        catch (err) {
+            deps.logger.setFailed(`stale-check: pulls.list failed at page ${page}: ${err instanceof Error ? err.message : String(err)}`);
+            return;
+        }
+        const batch = resp.data ?? [];
+        if (batch.length === 0)
+            break;
+        allPrs.push(...batch);
+        if (batch.length < PULLS_LIST_PAGE_SIZE)
+            break;
+        page++;
+    }
+    deps.logger.info(`stale-check: ${allPrs.length} open PRs to consider`);
+    for (const pr of allPrs) {
+        await processOnePrForStaleCheck(deps, owner, repo, pr, cfg, holidaysSet, todayISO, now);
+    }
+}
+async function processOnePrForStaleCheck(deps, owner, repo, pr, cfg, holidays, todayISO, now) {
+    const body = pr.body ?? '';
+    const prNumber = pr.number;
+    // Filter step 1: thread_ts marker required (bot doesn't own pre-install PRs).
+    const threadTs = marker_parse(body);
+    if (threadTs === null) {
+        deps.logger.info(`stale-check skipped: no-marker (PR #${prNumber})`);
+        return;
+    }
+    // Filter step 2: silent opt-out (FLT-02 parity).
+    if (isSilent(body)) {
+        deps.logger.info(`stale-check skipped: silent-marker (PR #${prNumber})`);
+        return;
+    }
+    // Filter step 3: drafts.
+    if (pr.draft === true) {
+        deps.logger.info(`stale-check skipped: draft (PR #${prNumber})`);
+        return;
+    }
+    // Filter step 4: bot author (FLT-01 parity — isBotActor handles both
+    // type='Bot' and the login-suffix belt-and-braces case).
+    if (isBotActor(pr.user)) {
+        deps.logger.info(`stale-check skipped: bot-author (PR #${prNumber})`);
+        return;
+    }
+    // Filter step 5: too old (calendar days).
+    const createdAtMs = new Date(pr.created_at).getTime();
+    if (Number.isFinite(createdAtMs)) {
+        const ageDays = (now.getTime() - createdAtMs) / (24 * 60 * 60 * 1000);
+        if (ageDays > cfg.maxAgeDays) {
+            deps.logger.info(`stale-check skipped: too-old (PR #${prNumber}, age=${Math.round(ageDays)}d)`);
+            return;
+        }
+    }
+    // Filter step 6: too young (business days).
+    const createdAtISO = pr.created_at.slice(0, 10);
+    const businessDaysOpen = businessDaysBetween(createdAtISO, todayISO, holidays);
+    if (businessDaysOpen < cfg.staleThresholdBusinessDays) {
+        deps.logger.info(`stale-check skipped: too-young (PR #${prNumber}, business_days_open=${businessDaysOpen})`);
+        return;
+    }
+    // Filter step 7: reping cooldown.
+    const lastPinged = parseStalePingedAt(body);
+    if (lastPinged !== null) {
+        const sinceLastPing = businessDaysBetween(lastPinged, todayISO, holidays);
+        if (sinceLastPing < cfg.repingIntervalBusinessDays) {
+            deps.logger.info(`stale-check skipped: reping-cooldown (PR #${prNumber}, business_days_since_last=${sinceLastPing})`);
+            return;
+        }
+    }
+    // Filter step 8 already handled at the run-level; per-PR is a no-op here.
+    // Filter step 9: max pings reached. Marker value is a STRING (D-02 / FND-06
+    // parity); integer-parse exactly once via Number.parseInt with explicit
+    // radix and NaN-fallback to 0.
+    const countStr = parseStalePingCount(body);
+    const parsedCount = countStr === null ? 0 : Number.parseInt(countStr, 10);
+    const safeCurrentCount = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 0;
+    if (safeCurrentCount >= cfg.maxPingsPerPr) {
+        deps.logger.info(`stale-check skipped: max-pings-reached (PR #${prNumber}, count=${safeCurrentCount})`);
+        return;
+    }
+    // Eligible — fire the ping (thread reply only; root-reaction-free per
+    // STAT-01 re-lock 2026-05-08).
+    const warn = (msg) => deps.logger.warning(msg);
+    const authorLogin = pr.user?.login ?? '';
+    const authorMention = resolve(authorLogin, deps.config.users, { warn });
+    const reviewerLogins = (pr.requested_reviewers ?? [])
+        .map((r) => r.login)
+        .filter((l) => typeof l === 'string' && l.length > 0);
+    const reviewerMentions = resolveAll(reviewerLogins, deps.config.users, { warn });
+    const replyText = formatStalePingReply({ businessDaysOpen, authorMention, reviewerMentions });
+    const reply = buildThreadReply({ text: replyText });
+    const channel = deps.config.channel.channel;
+    const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+    if (!postOk)
+        return; // postThreadReply already tier-mapped the error.
+    // Increment count + write both new markers via the existing patchWithRetry.
+    const nextCount = safeCurrentCount + 1;
+    const newBody = injectStalePingCount(injectStalePingedAt(body, todayISO), String(nextCount));
+    await patchWithRetry(deps, owner, repo, prNumber, newBody);
+    deps.logger.info(`posted stale-ping for PR #${prNumber} (business_days_open=${businessDaysOpen}, ping_count=${nextCount})`);
+}
 // --- Bootstrap (only runs in production; test envs short-circuit) ----------
 async function main() {
     try {
@@ -61635,9 +62135,23 @@ async function main() {
         }
         const usersYaml = external_node_fs_.readFileSync('config/users.yml', 'utf8');
         const channelYaml = external_node_fs_.readFileSync('config/channel.yml', 'utf8');
+        // Phase 3.1 — stale-check config is optional at file level so local dev
+        // and ad-hoc test environments don't crash if the YAML is absent. In
+        // production, tests/config-schema.test.ts enforces the on-disk shape; an
+        // absent file in production is a setup bug surfaced by the defensive
+        // setFailed inside handleStaleCheck.
+        let staleCheck;
+        try {
+            const staleCheckYaml = external_node_fs_.readFileSync('config/stale-check.yml', 'utf8');
+            staleCheck = loadStaleCheckConfig(staleCheckYaml);
+        }
+        catch {
+            staleCheck = undefined;
+        }
         const config = {
             users: loadUsersMap(usersYaml),
             channel: loadChannelConfig(channelYaml),
+            staleCheck,
         };
         const slack = new dist.WebClient(slackToken);
         const octokit = getOctokit(githubToken);
@@ -61656,7 +62170,14 @@ async function main() {
                 },
             },
             octokit: {
-                rest: { pulls: { get: octokit.rest.pulls.get, update: octokit.rest.pulls.update } },
+                rest: {
+                    pulls: {
+                        get: octokit.rest.pulls.get,
+                        update: octokit.rest.pulls.update,
+                        // Phase 3.1 — pulls.list for the schedule-event PR-discovery loop.
+                        list: octokit.rest.pulls.list,
+                    },
+                },
             },
             config,
             logger: {
@@ -61664,14 +62185,29 @@ async function main() {
                 warning: (m) => warning(m),
                 setFailed: (m) => setFailed(m),
             },
+            repo: github_context.repo,
         };
-        await handleEvent(deps, {
-            event: {
-                name: github_context.eventName,
-                payload: github_context.payload,
-                repo: github_context.repo,
-            },
-        });
+        // Phase 3.1 — schedule events do not carry a webhook payload; route to the
+        // dedicated stale-check entry point BEFORE the webhook dispatcher. Webhook
+        // events fall through to handleEvent as before.
+        if (github_context.eventName === 'schedule') {
+            await handleStaleCheck(deps, {
+                event: {
+                    name: 'schedule',
+                    payload: {},
+                    repo: github_context.repo,
+                },
+            });
+        }
+        else {
+            await handleEvent(deps, {
+                event: {
+                    name: github_context.eventName,
+                    payload: github_context.payload,
+                    repo: github_context.repo,
+                },
+            });
+        }
     }
     catch (err) {
         setFailed(err instanceof Error ? err.message : String(err));
@@ -61684,8 +62220,9 @@ if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
     void main();
 }
 
-var __webpack_exports__handleEvent = __webpack_exports__.N;
-var __webpack_exports__main = __webpack_exports__.i;
-export { __webpack_exports__handleEvent as handleEvent, __webpack_exports__main as main };
+var __webpack_exports__handleEvent = __webpack_exports__.N6;
+var __webpack_exports__handleStaleCheck = __webpack_exports__._e;
+var __webpack_exports__main = __webpack_exports__.iW;
+export { __webpack_exports__handleEvent as handleEvent, __webpack_exports__handleStaleCheck as handleStaleCheck, __webpack_exports__main as main };
 
 //# sourceMappingURL=index.js.map
