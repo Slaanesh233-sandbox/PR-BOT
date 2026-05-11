@@ -55,11 +55,7 @@ describe('businessDaysBetween — holidays', () => {
     // Memorial Day 2026-05-25 is a Monday. Range Mon 2026-05-25 → Mon 2026-06-01
     // exclusive without holidays = 5 (full week). With Memorial Day subtracted = 4.
     const without = businessDaysBetween('2026-05-25', '2026-06-01', new Set());
-    const withMemorial = businessDaysBetween(
-      '2026-05-25',
-      '2026-06-01',
-      new Set(['2026-05-25']),
-    );
+    const withMemorial = businessDaysBetween('2026-05-25', '2026-06-01', new Set(['2026-05-25']));
     expect(without).toBe(5);
     expect(withMemorial).toBe(4);
   });
@@ -80,9 +76,7 @@ describe('businessDaysBetween — holidays', () => {
     //   Fri counts; [Sat], [Sun] skip; result = 1. Adding 2026-07-04 to the holiday
     //   set does NOT change the result (Sat was already skipped as non-business).
     expect(businessDaysBetween('2026-07-03', '2026-07-06', new Set())).toBe(1);
-    expect(
-      businessDaysBetween('2026-07-03', '2026-07-06', new Set(['2026-07-04'])),
-    ).toBe(1);
+    expect(businessDaysBetween('2026-07-03', '2026-07-06', new Set(['2026-07-04']))).toBe(1);
   });
 
   it('holiday outside [start, end) range is ignored', () => {
@@ -90,9 +84,7 @@ describe('businessDaysBetween — holidays', () => {
     // exclusive includes Mon-Thu = 4 business days. Adding 2026-12-25 to the
     // holiday set does NOT change the result (it falls before start).
     expect(businessDaysBetween('2026-12-28', '2027-01-01', new Set())).toBe(4);
-    expect(
-      businessDaysBetween('2026-12-28', '2027-01-01', new Set(['2026-12-25'])),
-    ).toBe(4);
+    expect(businessDaysBetween('2026-12-28', '2027-01-01', new Set(['2026-12-25']))).toBe(4);
   });
 });
 
@@ -143,9 +135,7 @@ describe('businessDaysBetween — defensive edge cases', () => {
     //   (20-24), (27-31) = 23 weekdays.
     // Without holiday subtraction: 23. With 2026-07-03 holiday: 22.
     expect(businessDaysBetween('2026-07-01', '2026-08-01', new Set())).toBe(23);
-    expect(
-      businessDaysBetween('2026-07-01', '2026-08-01', new Set(['2026-07-03'])),
-    ).toBe(22);
+    expect(businessDaysBetween('2026-07-01', '2026-08-01', new Set(['2026-07-03']))).toBe(22);
   });
 });
 
