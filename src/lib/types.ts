@@ -148,6 +148,32 @@ export interface ReopenSummary {
   readonly reviewerLogins: readonly GitHubLogin[];
 }
 
+// === Phase 3.1 — stale-check config type ====================================
+//
+// Validated by loadStaleCheckConfig (config-loader.ts) against config/stale-check.yml.
+// Defaults applied when keys absent — see config-loader.ts JSDoc for the locked
+// defaults (3 / 30 / 2 / 3 per CONTEXT.md "Implementation defaults the planner
+// should ship as-is").
+//
+// `holidays` is the raw list from YAML; the dispatcher in Plan 03.1-02 wraps
+// it (or passes through directly — the businessDaysBetween helper accepts both
+// shapes via the Holidays type alias).
+//
+// FORBIDDEN FIELDS (do not add to v1; deferred per CONTEXT.md "Deferred ideas"):
+//   - per_repo_overrides
+//   - per_team_routing
+//   - silent_PRs_list
+//   - escalation_steps
+//   - mute_via_comment_token
+
+export interface StaleCheckConfig {
+  readonly holidays: readonly string[];
+  readonly staleThresholdBusinessDays: number;
+  readonly maxAgeDays: number;
+  readonly repingIntervalBusinessDays: number;
+  readonly maxPingsPerPr: number;
+}
+
 // Event-router output (consumed by event-router.ts in Plan 03b): a description of what to do,
 // NOT the side-effect itself.
 export type RoutedEvent =

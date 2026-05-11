@@ -24,6 +24,7 @@ import {
   type GitHubLogin,
   type SlackChannelId,
   type SlackUserId,
+  type StaleCheckConfig,
   USERS_ID_REGEX,
   type UsersMap,
 } from './types.js';
@@ -93,4 +94,140 @@ export function loadChannelConfig(yamlText: string): ChannelConfig {
     );
   }
   return { channel: root.channel as SlackChannelId };
+}
+
+// === Phase 3.1 — stale-check config loader (STALE-01) =======================
+//
+// Same pattern as loadUsersMap / loadChannelConfig: parseYaml → typeof checks
+// → schema checks → throw with greppable prefix on violation.
+//
+// Locked defaults from CONTEXT.md "Implementation defaults the planner should
+// ship as-is":
+//   - stale_threshold_business_days = 3
+//   - max_age_days = 30
+//   - reping_interval_business_days = 2
+//   - max_pings_per_pr = 3
+//
+// holidays defaults to [] when absent (the cron's Mon-Fri schedule restriction
+// + business-day filter cover the baseline; admins append company-specific
+// days as needed).
+
+const STALE_CHECK_DEFAULTS: StaleCheckConfig = {
+  holidays: [],
+  staleThresholdBusinessDays: 3,
+  maxAgeDays: 30,
+  repingIntervalBusinessDays: 2,
+  maxPingsPerPr: 3,
+};
+
+// Strict anchored ISO-8601 date regex. Shared with the marker validator for
+// stale_pinged_at (Plan 03.1-02 import).
+const STALE_CHECK_ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+function requirePositiveInteger(field: string, value: unknown): number {
+  if (typeof value !== 'number') {
+    throw new Error(
+      `stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`,
+    );
+  }
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`stale-check.yml schema: ${field} must be a positive integer, got ${value}`);
+  }
+  return value;
+}
+
+/**
+ * Parse + validate a `config/stale-check.yml` text. Phase 3.1 STALE-01.
+ *
+ * Schema:
+ *   - top-level mapping (object); empty/null body allowed (returns all defaults)
+ *   - `holidays`: array of ISO-8601 date strings matching /^\d{4}-\d{2}-\d{2}$/.
+ *     Default: [] (no extra holidays beyond the cron's Mon-Fri restriction).
+ *   - `stale_threshold_business_days`: positive integer; default 3
+ *   - `max_age_days`: positive integer; default 30
+ *   - `reping_interval_business_days`: positive integer; default 2
+ *   - `max_pings_per_pr`: positive integer; default 3
+ *
+ * Throws `Error` with prefix `stale-check.yml schema:` on any violation. The
+ * dispatcher in Plan 03.1-02 catches these and routes through `core.setFailed`
+ * (same D-17 pattern as loadUsersMap / loadChannelConfig).
+ *
+ * Defaults source: CONTEXT.md "Implementation defaults the planner should
+ * ship as-is" section.
+ */
+export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
+  const parsed = parseYaml(yamlText) as unknown;
+
+  // Empty / null / undefined YAML → all defaults. Treat the file as an empty
+  // mapping so omitted-key paths below resolve uniformly.
+  if (parsed === null || parsed === undefined) {
+    return STALE_CHECK_DEFAULTS;
+  }
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(
+      `stale-check.yml schema: top-level must be a mapping (got ${Array.isArray(parsed) ? 'array' : typeof parsed})`,
+    );
+  }
+
+  const root = parsed as {
+    holidays?: unknown;
+    stale_threshold_business_days?: unknown;
+    max_age_days?: unknown;
+    reping_interval_business_days?: unknown;
+    max_pings_per_pr?: unknown;
+  };
+
+  // holidays — array of ISO date strings; default [].
+  let holidays: readonly string[] = STALE_CHECK_DEFAULTS.holidays;
+  if (root.holidays !== undefined && root.holidays !== null) {
+    if (!Array.isArray(root.holidays)) {
+      throw new Error(
+        `stale-check.yml schema: holidays must be an array, got ${typeof root.holidays}`,
+      );
+    }
+    const out: string[] = [];
+    for (let i = 0; i < root.holidays.length; i += 1) {
+      const entry = root.holidays[i];
+      if (typeof entry !== 'string') {
+        throw new Error(
+          `stale-check.yml schema: holidays[${i}] must be a string, got ${typeof entry}`,
+        );
+      }
+      if (!STALE_CHECK_ISO_DATE_REGEX.test(entry)) {
+        throw new Error(
+          `stale-check.yml schema: holidays[${i}] ("${entry}") does not match ISO-8601 date regex /^\\d{4}-\\d{2}-\\d{2}$/`,
+        );
+      }
+      out.push(entry);
+    }
+    holidays = out;
+  }
+
+  const staleThresholdBusinessDays =
+    root.stale_threshold_business_days === undefined
+      ? STALE_CHECK_DEFAULTS.staleThresholdBusinessDays
+      : requirePositiveInteger('stale_threshold_business_days', root.stale_threshold_business_days);
+
+  const maxAgeDays =
+    root.max_age_days === undefined
+      ? STALE_CHECK_DEFAULTS.maxAgeDays
+      : requirePositiveInteger('max_age_days', root.max_age_days);
+
+  const repingIntervalBusinessDays =
+    root.reping_interval_business_days === undefined
+      ? STALE_CHECK_DEFAULTS.repingIntervalBusinessDays
+      : requirePositiveInteger('reping_interval_business_days', root.reping_interval_business_days);
+
+  const maxPingsPerPr =
+    root.max_pings_per_pr === undefined
+      ? STALE_CHECK_DEFAULTS.maxPingsPerPr
+      : requirePositiveInteger('max_pings_per_pr', root.max_pings_per_pr);
+
+  return {
+    holidays,
+    staleThresholdBusinessDays,
+    maxAgeDays,
+    repingIntervalBusinessDays,
+    maxPingsPerPr,
+  };
 }

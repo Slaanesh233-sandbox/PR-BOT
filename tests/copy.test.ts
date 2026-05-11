@@ -284,8 +284,6 @@ describe('formatStalePingReply (STALE-01 — locked copy 2026-05-08, CONTEXT.md 
         authorMention: mapped('<@UAuth>'),
         reviewerMentions: [mapped('<@UMapped>'), fallback('@unmapped', 'unmapped')],
       }),
-    ).toBe(
-      '📬 this PR has been open for 5 business days.\n  cc <@UAuth> <@UMapped> @unmapped',
-    );
+    ).toBe('📬 this PR has been open for 5 business days.\n  cc <@UAuth> <@UMapped> @unmapped');
   });
 });

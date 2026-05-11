@@ -180,3 +180,51 @@ export function formatMergeReply(args: { readonly mergerMention: ResolvedMention
 export function formatCloseReply(args: { readonly closerMention: ResolvedMention }): string {
   return `:no_entry_sign: ${args.closerMention.text} closed the pull request`;
 }
+
+/**
+ * STALE-01 stale-ping thread reply (CONTEXT.md Decision 2 — locked 2026-05-08).
+ *
+ * Locked copy (rendered values shown by intent, not by literal syntax — the
+ * comment-token convention from Plans 01-03a / 01-03b / 02-02 keeps the
+ * FLT-05 angle-bracket-at-U substring out of every file except mentions.ts):
+ *
+ *   line 1: 📬 this PR has been open for {N} business days.
+ *   line 2: (two spaces) cc {author-mention} {reviewer1-mention} {reviewer2-mention} ...
+ *
+ * The leading 📬 emoji is a literal char (U+1F4EC), distinguishing stale-pings
+ * from review thread replies (':thumbsup:' / ':ok_hand:' / ':warning:') and
+ * terminal events (':tada:' / ':no_entry_sign:'). The newline + two-space
+ * indent before 'cc' is exactly '\n  ' — same pattern as buildRootMessage's
+ * OPEN-04 cc clause.
+ *
+ * Author is ALWAYS rendered, even when reviewerMentions is empty (zero-
+ * reviewer edge case from CONTEXT.md Decision 2: cc {author-mention} alone —
+ * the author at least learns their PR is stale and can find a reviewer).
+ *
+ * The formatter takes ALREADY-RESOLVED ResolvedMention objects and uses .text
+ * only — FLT-05 invariant. Mention-syntax construction lives only in
+ * `mentions.ts`. Both mapped and fallback mentions flow through unchanged
+ * (mapped: real Slack ping; fallback: plain @login that does not ping).
+ *
+ * Throws RangeError for businessDaysOpen < 1 or non-integer (parity with
+ * formatPrCommentReply / formatReviewCommentReply existing range-checks).
+ * The dispatcher in Plan 03.1-02 will never pass N < 3 (the staleness
+ * threshold) but the formatter is defensive.
+ *
+ * STAT-01 re-lock 2026-05-08 invariant: the stale-ping is a THREAD REPLY only.
+ * This formatter emits TEXT only — there is no reactions-related primitive
+ * that a dispatcher could mistake for a root-message reaction trigger.
+ */
+export function formatStalePingReply(args: {
+  readonly businessDaysOpen: number;
+  readonly authorMention: ResolvedMention;
+  readonly reviewerMentions: readonly ResolvedMention[];
+}): string {
+  if (!Number.isInteger(args.businessDaysOpen) || args.businessDaysOpen < 1) {
+    throw new RangeError(
+      `formatStalePingReply: businessDaysOpen must be a positive integer, got ${args.businessDaysOpen}`,
+    );
+  }
+  const ccTexts = [args.authorMention.text, ...args.reviewerMentions.map((m) => m.text)].join(' ');
+  return `📬 this PR has been open for ${args.businessDaysOpen} business days.\n  cc ${ccTexts}`;
+}
