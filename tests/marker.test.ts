@@ -217,9 +217,7 @@ describe('marker.parseStalePingedAt', () => {
   // strictly anchored YYYY-MM-DD as if the marker were absent (return null).
   describe('WR-06 — value-shape validation', () => {
     it('returns null for malformed-date marker value (garbage-not-a-date)', () => {
-      expect(
-        parseStalePingedAt('<!-- pr-bot:stale_pinged_at=garbage-not-a-date -->'),
-      ).toBeNull();
+      expect(parseStalePingedAt('<!-- pr-bot:stale_pinged_at=garbage-not-a-date -->')).toBeNull();
     });
 
     it('returns null for partial-ISO marker value (missing day component)', () => {

@@ -1151,9 +1151,7 @@ async function processOnePrForStaleCheck(
   }
   const ageDays = (now.getTime() - createdAtMs) / (24 * 60 * 60 * 1000);
   if (ageDays > cfg.maxAgeDays) {
-    deps.logger.info(
-      `stale-check skipped: too-old (PR #${prNumber}, age=${Math.round(ageDays)}d)`,
-    );
+    deps.logger.info(`stale-check skipped: too-old (PR #${prNumber}, age=${Math.round(ageDays)}d)`);
     return;
   }
 
