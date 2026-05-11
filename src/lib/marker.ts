@@ -127,10 +127,28 @@ export const STALE_PINGED_AT_REGEX = /<!--\s*pr-bot:stale_pinged_at=(\S+?)\s*-->
  */
 export const STALE_PING_COUNT_REGEX = /<!--\s*pr-bot:stale_ping_count=(\S+?)\s*-->/;
 
-/** Extract the embedded `stale_pinged_at` ISO date. Returns `null` if absent. */
+/**
+ * Anchored ISO-8601 date shape — same /^\d{4}-\d{2}-\d{2}$/ pattern used by
+ * the holiday loader in src/lib/config-loader.ts (STALE_CHECK_ISO_DATE_REGEX).
+ * WR-06 — parseStalePingedAt validates the captured value against this regex
+ * and treats any non-conforming marker as if it were absent (returns null).
+ * The captured value flows directly into businessDaysBetween arithmetic at
+ * the stale-check call site; a non-ISO value would throw RangeError, and PR
+ * bodies are human-editable.
+ */
+const STALE_PINGED_AT_VALUE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Extract the embedded `stale_pinged_at` ISO date. Returns `null` if absent
+ * OR if the marker's value does not match the anchored YYYY-MM-DD shape.
+ * A malformed value is silently treated as absent so the stale-check loop
+ * does not abort on a bad PR-body edit.
+ */
 export function parseStalePingedAt(body: string): string | null {
   const m = body.match(STALE_PINGED_AT_REGEX);
-  return m && m[1] !== undefined ? m[1] : null;
+  if (!m || m[1] === undefined) return null;
+  if (!STALE_PINGED_AT_VALUE_SHAPE.test(m[1])) return null;
+  return m[1];
 }
 
 /** Render a stale_pinged_at marker. Output: `<!-- pr-bot:stale_pinged_at=${date} -->`. */
