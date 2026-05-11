@@ -1215,11 +1215,25 @@ export async function main(): Promise<void> {
     // production, tests/config-schema.test.ts enforces the on-disk shape; an
     // absent file in production is a setup bug surfaced by the defensive
     // setFailed inside handleStaleCheck.
+    //
+    // WR-02 — distinguish ENOENT (file absent → benign, leave staleCheck
+    // undefined and let webhook events proceed; the schedule path's
+    // defensive setFailed inside handleStaleCheck will fire if a cron run
+    // happens with no config) from schema violations (malformed YAML or
+    // failing requireNonNegativeInteger etc. → loud-fail per D-17 invariant,
+    // surface the loader's exact error message in the Actions run as a red X).
     let staleCheck: StaleCheckConfig | undefined;
     try {
       const staleCheckYaml = fs.readFileSync('config/stale-check.yml', 'utf8');
       staleCheck = loadStaleCheckConfig(staleCheckYaml);
-    } catch {
+    } catch (err) {
+      const isMissingFile = (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+      if (!isMissingFile) {
+        core.setFailed(
+          `config/stale-check.yml schema error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
       staleCheck = undefined;
     }
     const config = {
