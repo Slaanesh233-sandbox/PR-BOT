@@ -1865,6 +1865,40 @@ describe('handleStaleCheck — pulls.list pagination', () => {
     );
     expect(calledNumbers.some((n) => n >= 2000)).toBe(true);
   });
+
+  // WR-07 — the discovery loop must enforce a page-count ceiling. A
+  // pathological repo with >1000 open PRs would otherwise consume real
+  // REST-API quota on every cron tick. The cap is 10 pages × 100 per page
+  // = 1000 PRs; on hit, emit a warning naming the cap and the repo. Older
+  // PRs (beyond the cap) are NOT processed this run; the warning surfaces
+  // the visibility so operators can narrow the scope.
+  it('WR-07 — pulls.list page cap stops at 10 pages with a warning', async () => {
+    // Mock an unbounded supply: every page returns 100 ineligible-but-
+    // existing PRs (so no postMessage fires, just keeps the loop turning).
+    // PRs use a "no-marker" body so they short-circuit at filter step 1.
+    const buildIneligiblePage = (start: number, count: number): FakePr[] =>
+      Array.from({ length: count }, (_, i) =>
+        // body: empty (no thread_ts marker) → skipped at step 1
+        fakePr({ number: start + i, body: '' }),
+      );
+    let callIndex = 0;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: async () => {
+        callIndex++;
+        // Always return 100 PRs — would loop forever without the cap.
+        return { data: buildIneligiblePage(callIndex * 1000, 100) };
+      },
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    // Cap is 10 pages; pulls.list called exactly that many times.
+    expect(spies.pullsList).toHaveBeenCalledTimes(10);
+    // Warning naming the cap + repo present.
+    expect(spies.warning).toHaveBeenCalledWith(
+      expect.stringMatching(/max-pages|page-cap|10.*pages/i),
+    );
+  });
 });
 
 describe('handleStaleCheck — defensive: missing stale-check config', () => {
