@@ -1054,7 +1054,24 @@ export async function handleStaleCheck(deps: Deps, ctx?: HandleEventCtx): Promis
   deps.logger.info(`stale-check: ${allPrs.length} open PRs to consider`);
 
   for (const pr of allPrs) {
-    await processOnePrForStaleCheck(deps, owner, repo, pr, cfg, holidaysSet, todayISO, now);
+    // WR-01 per-PR error isolation — every iteration is independent. An
+    // unexpected throw from processOnePrForStaleCheck (e.g. a future-API
+    // contract change yielding a malformed pr.created_at, a manually-edited
+    // marker carrying a non-ISO value past the parse-time guard, an
+    // unclassified octokit exception) must not abort the rest of the run.
+    // Inner guards (WR-05 malformed-created_at, WR-06 malformed-marker)
+    // handle the known throw paths; this outer catch is the belt-and-braces
+    // floor. The source-comment claim at lines 993-994 ("Failures on one PR
+    // do not abort the loop — each PR is independent") is now enforced.
+    try {
+      await processOnePrForStaleCheck(deps, owner, repo, pr, cfg, holidaysSet, todayISO, now);
+    } catch (err) {
+      deps.logger.warning(
+        `stale-check: PR #${pr.number} threw unexpectedly; continuing to next PR. ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 }
 
