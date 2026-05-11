@@ -27,6 +27,7 @@ import {
   formatRequestedReviewReply,
   formatReviewCommentReply,
   formatReviewReply,
+  formatStalePingReply,
   pickApprovedEmoji,
 } from '../src/lib/copy.js';
 import type { ResolvedMention } from '../src/lib/types.js';
@@ -185,6 +186,106 @@ describe('formatRequestedReviewReply / formatReopenReply / formatMergeReply / fo
   it("formatCloseReply → ':no_entry_sign: <closer> closed the pull request'", () => {
     expect(formatCloseReply({ closerMention: m('<@UClos>') })).toBe(
       ':no_entry_sign: <@UClos> closed the pull request',
+    );
+  });
+});
+
+describe('formatStalePingReply (STALE-01 — locked copy 2026-05-08, CONTEXT.md Decision 2)', () => {
+  const mapped = (text: string, login = 'u'): ResolvedMention => ({ kind: 'mapped', text, login });
+  const fallback = (text: string, login = 'u'): ResolvedMention => ({
+    kind: 'fallback',
+    text,
+    login,
+  });
+
+  it('zero reviewers → cc clause is single author mention', () => {
+    expect(
+      formatStalePingReply({
+        businessDaysOpen: 3,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [],
+      }),
+    ).toBe('📬 this PR has been open for 3 business days.\n  cc <@UAuth>');
+  });
+
+  it('one reviewer → author + reviewer in order', () => {
+    expect(
+      formatStalePingReply({
+        businessDaysOpen: 3,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [mapped('<@URev1>')],
+      }),
+    ).toBe('📬 this PR has been open for 3 business days.\n  cc <@UAuth> <@URev1>');
+  });
+
+  it('three reviewers → all rendered in input order, single-space joined', () => {
+    expect(
+      formatStalePingReply({
+        businessDaysOpen: 4,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [mapped('<@URev1>'), mapped('<@URev2>'), mapped('<@URev3>')],
+      }),
+    ).toBe(
+      '📬 this PR has been open for 4 business days.\n  cc <@UAuth> <@URev1> <@URev2> <@URev3>',
+    );
+  });
+
+  it('fallback-kind author mention flows through as plain @login (FLT-05 inheritance)', () => {
+    expect(
+      formatStalePingReply({
+        businessDaysOpen: 3,
+        authorMention: fallback('@kai', 'kai'),
+        reviewerMentions: [],
+      }),
+    ).toBe('📬 this PR has been open for 3 business days.\n  cc @kai');
+  });
+
+  it('N=8 renders as "8 business days" (no thousand-separator, no float)', () => {
+    expect(
+      formatStalePingReply({
+        businessDaysOpen: 8,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [],
+      }),
+    ).toContain('8 business days');
+  });
+
+  it('throws RangeError on N=0', () => {
+    expect(() =>
+      formatStalePingReply({
+        businessDaysOpen: 0,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [],
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it('throws RangeError on non-integer N (3.5, NaN)', () => {
+    expect(() =>
+      formatStalePingReply({
+        businessDaysOpen: 3.5,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [],
+      }),
+    ).toThrow(RangeError);
+    expect(() =>
+      formatStalePingReply({
+        businessDaysOpen: Number.NaN,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [],
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it('mixed mapped + fallback reviewer mentions all flow through via .text', () => {
+    expect(
+      formatStalePingReply({
+        businessDaysOpen: 5,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [mapped('<@UMapped>'), fallback('@unmapped', 'unmapped')],
+      }),
+    ).toBe(
+      '📬 this PR has been open for 5 business days.\n  cc <@UAuth> <@UMapped> @unmapped',
     );
   });
 });

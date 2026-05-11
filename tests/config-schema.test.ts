@@ -17,6 +17,7 @@ import {
   CHANNEL_REGEX,
   USERS_REGEX,
   loadChannelConfig,
+  loadStaleCheckConfig,
   loadUsersMap,
 } from '../src/lib/config-loader.js';
 
@@ -97,5 +98,124 @@ describe('loadChannelConfig negative cases (D-16)', () => {
 
   it('throws when channel value is non-string', () => {
     expect(() => loadChannelConfig('channel:\n  nested: yes\n')).toThrow(/channel/);
+  });
+});
+
+// === Phase 3.1 — loadStaleCheckConfig schema + on-disk gate (STALE-01) ======
+//
+// Same HARD-FAIL pattern as loadUsersMap / loadChannelConfig: a typo or
+// malformed value in config/stale-check.yml fails npm test (and therefore CI)
+// rather than silently entering production. Defaults source: CONTEXT.md
+// "Implementation defaults the planner should ship as-is" — 3 / 30 / 2 / 3.
+
+describe('loadStaleCheckConfig — defaults + happy path (CONTEXT.md Implementation defaults)', () => {
+  it('empty YAML body returns the four locked defaults + empty holidays', () => {
+    const cfg = loadStaleCheckConfig('');
+    expect(cfg.staleThresholdBusinessDays).toBe(3);
+    expect(cfg.maxAgeDays).toBe(30);
+    expect(cfg.repingIntervalBusinessDays).toBe(2);
+    expect(cfg.maxPingsPerPr).toBe(3);
+    expect(cfg.holidays).toEqual([]);
+  });
+
+  it('full-explicit YAML returns the parsed values verbatim', () => {
+    const yaml = [
+      'stale_threshold_business_days: 5',
+      'max_age_days: 45',
+      'reping_interval_business_days: 3',
+      'max_pings_per_pr: 4',
+      'holidays:',
+      '  - 2026-12-25',
+      '  - 2027-01-01',
+      '',
+    ].join('\n');
+    const cfg = loadStaleCheckConfig(yaml);
+    expect(cfg.staleThresholdBusinessDays).toBe(5);
+    expect(cfg.maxAgeDays).toBe(45);
+    expect(cfg.repingIntervalBusinessDays).toBe(3);
+    expect(cfg.maxPingsPerPr).toBe(4);
+    expect(cfg.holidays).toEqual(['2026-12-25', '2027-01-01']);
+  });
+
+  it('holidays key omitted returns empty holidays array', () => {
+    const cfg = loadStaleCheckConfig('max_age_days: 30\n');
+    expect(cfg.holidays).toEqual([]);
+  });
+});
+
+describe('loadStaleCheckConfig — negative cases (HARD-FAIL on schema violations)', () => {
+  it('throws when holidays is not an array', () => {
+    expect(() => loadStaleCheckConfig('holidays: not-an-array\n')).toThrow(
+      /stale-check\.yml schema:.*holidays/,
+    );
+  });
+
+  it('throws when a holiday entry is not a string (nested map)', () => {
+    expect(() => loadStaleCheckConfig('holidays:\n  - foo: bar\n')).toThrow(
+      /stale-check\.yml schema/,
+    );
+  });
+
+  it('throws when a holiday entry does not match strict ISO-8601 regex', () => {
+    expect(() => loadStaleCheckConfig('holidays:\n  - "2026-5-8"\n')).toThrow(
+      /stale-check\.yml schema/,
+    );
+    expect(() => loadStaleCheckConfig('holidays:\n  - "2026/05/08"\n')).toThrow(
+      /stale-check\.yml schema/,
+    );
+    expect(() => loadStaleCheckConfig('holidays:\n  - "5/8/2026"\n')).toThrow(
+      /stale-check\.yml schema/,
+    );
+  });
+
+  it('throws when stale_threshold_business_days is 0 (must be positive)', () => {
+    expect(() => loadStaleCheckConfig('stale_threshold_business_days: 0\n')).toThrow(
+      /stale-check\.yml schema.*stale_threshold_business_days/,
+    );
+  });
+
+  it('throws when stale_threshold_business_days is a string', () => {
+    expect(() => loadStaleCheckConfig('stale_threshold_business_days: "3"\n')).toThrow(
+      /stale-check\.yml schema/,
+    );
+  });
+
+  it('throws when max_age_days is negative', () => {
+    expect(() => loadStaleCheckConfig('max_age_days: -1\n')).toThrow(
+      /stale-check\.yml schema.*max_age_days/,
+    );
+  });
+
+  it('throws when max_pings_per_pr is a float (non-integer)', () => {
+    expect(() => loadStaleCheckConfig('max_pings_per_pr: 3.5\n')).toThrow(
+      /stale-check\.yml schema.*max_pings_per_pr/,
+    );
+  });
+});
+
+describe('config/stale-check.yml on-disk schema (HARD-FAIL gate)', () => {
+  it('parses cleanly via loadStaleCheckConfig (STALE-01)', () => {
+    const yamlText = readFileSync(resolvePath(repoRoot, 'config/stale-check.yml'), 'utf-8');
+    expect(() => loadStaleCheckConfig(yamlText)).not.toThrow();
+  });
+
+  it('ships exactly the 12 US federal holidays from CONTEXT.md Decision 1', () => {
+    const yamlText = readFileSync(resolvePath(repoRoot, 'config/stale-check.yml'), 'utf-8');
+    const cfg = loadStaleCheckConfig(yamlText);
+    expect(cfg.holidays).toHaveLength(12);
+    // Spot-check a few known dates from the locked list.
+    expect(cfg.holidays).toContain('2026-05-25'); // Memorial Day
+    expect(cfg.holidays).toContain('2026-12-25'); // Christmas
+    expect(cfg.holidays).toContain('2027-01-01'); // New Year's Day
+    expect(cfg.holidays).toContain('2027-05-31'); // Memorial Day 2027
+  });
+
+  it('ships the four locked thresholds: 3 / 30 / 2 / 3', () => {
+    const yamlText = readFileSync(resolvePath(repoRoot, 'config/stale-check.yml'), 'utf-8');
+    const cfg = loadStaleCheckConfig(yamlText);
+    expect(cfg.staleThresholdBusinessDays).toBe(3);
+    expect(cfg.maxAgeDays).toBe(30);
+    expect(cfg.repingIntervalBusinessDays).toBe(2);
+    expect(cfg.maxPingsPerPr).toBe(3);
   });
 });
