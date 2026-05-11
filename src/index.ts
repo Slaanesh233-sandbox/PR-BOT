@@ -995,6 +995,14 @@ async function patchWithRetry(
 // the Slack reaction-add or reaction-remove APIs (the new code path is
 // reaction-free; root reactions remain reserved for terminal-state events).
 const PULLS_LIST_PAGE_SIZE = 100;
+// WR-07 — sanity ceiling on the discovery loop. A pathological repo with
+// >1000 open PRs would otherwise consume real REST-API quota on every cron
+// tick (5000/hr per repo on GITHUB_TOKEN; 10 watched repos × ~50 cron ticks
+// per week would chew through the free tier). The team's ~10 repos with
+// ~15 humans implies a total open-PR count well under 100, so 10 pages =
+// 1000 PRs is a conservative ceiling; on hit, emit a warning so operators
+// can narrow the scope (label, age cutoff, etc.).
+const PULLS_LIST_MAX_PAGES = 10;
 
 export async function handleStaleCheck(deps: Deps, ctx?: HandleEventCtx): Promise<void> {
   const cfg = deps.config.staleCheck;
@@ -1024,10 +1032,14 @@ export async function handleStaleCheck(deps: Deps, ctx?: HandleEventCtx): Promis
     return;
   }
 
-  // Discover candidate PRs via paginated pulls.list.
+  // Discover candidate PRs via paginated pulls.list. WR-07 — cap the loop
+  // at PULLS_LIST_MAX_PAGES (10 × 100 = 1000 PRs) so a pathological repo
+  // cannot consume the cron's REST-API quota indefinitely. On cap, emit a
+  // warning naming the limit and the repo; older PRs are skipped this run.
   const allPrs: PullListItem[] = [];
   let page = 1;
-  while (true) {
+  let capReached = false;
+  while (page <= PULLS_LIST_MAX_PAGES) {
     let resp: { data: ReadonlyArray<PullListItem> };
     try {
       resp = await deps.octokit.rest.pulls.list({
@@ -1049,7 +1061,16 @@ export async function handleStaleCheck(deps: Deps, ctx?: HandleEventCtx): Promis
     if (batch.length === 0) break;
     allPrs.push(...batch);
     if (batch.length < PULLS_LIST_PAGE_SIZE) break;
+    if (page === PULLS_LIST_MAX_PAGES) {
+      capReached = true;
+      break;
+    }
     page++;
+  }
+  if (capReached) {
+    deps.logger.warning(
+      `stale-check: reached max-pages cap (${PULLS_LIST_MAX_PAGES} pages × ${PULLS_LIST_PAGE_SIZE}) for ${owner}/${repo}; ${allPrs.length} PRs considered. Repo has >${PULLS_LIST_MAX_PAGES * PULLS_LIST_PAGE_SIZE} open PRs — narrowing scope needed (older PRs not checked this run).`,
+    );
   }
   deps.logger.info(`stale-check: ${allPrs.length} open PRs to consider`);
 
