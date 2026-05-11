@@ -1262,7 +1262,16 @@ export async function main(): Promise<void> {
     // Phase 3.1 — schedule events do not carry a webhook payload; route to the
     // dedicated stale-check entry point BEFORE the webhook dispatcher. Webhook
     // events fall through to handleEvent as before.
-    if (context.eventName === 'schedule') {
+    //
+    // The workflow_dispatch synonym exists exclusively to support the Phase 3.1
+    // sandbox keystone synthetic-fire path: `gh workflow run pr-bot.yml` sets
+    // context.eventName to 'workflow_dispatch' (NOT 'schedule'), so without
+    // accepting it here the keystone cannot exercise handleStaleCheck on demand.
+    // The canonical examples/pr-bot.yml stays cron-only; only the sandbox stubs
+    // add the `workflow_dispatch:` trigger (and only for keystone validation).
+    // Both event names route to the same handleStaleCheck dispatch — there is
+    // no behavioral divergence between them.
+    if (context.eventName === 'schedule' || context.eventName === 'workflow_dispatch') {
       await handleStaleCheck(deps, {
         event: {
           name: 'schedule',
