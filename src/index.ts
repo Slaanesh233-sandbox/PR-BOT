@@ -1242,6 +1242,20 @@ export async function main(): Promise<void> {
       staleCheck,
     };
 
+    // WR-04 — production safety guard. The D3 relaxation makes
+    // reping_interval_business_days=0 a valid schema value (the Phase 3.1
+    // keystone needs it). In production with a frequent cron, however, 0
+    // disables the per-PR cooldown — every run re-pings eligible PRs, capped
+    // only by max_pings_per_pr. That cap can be exhausted in a single
+    // afternoon. Surface a startup warning so operators see the risk in the
+    // Actions run; one-time log (not per-PR). This is intentional permissive
+    // mode — we DO NOT setFailed because the keystone path is legitimate.
+    if (staleCheck !== undefined && staleCheck.repingIntervalBusinessDays === 0) {
+      core.warning(
+        'config/stale-check.yml: reping_interval_business_days=0 disables the stale-check cooldown — every cron run will re-ping eligible PRs, capped only by max_pings_per_pr. Set to >=1 for production.',
+      );
+    }
+
     const slack = new WebClient(slackToken);
     const octokit = getOctokit(githubToken);
 
