@@ -208,6 +208,40 @@ describe('marker.parseStalePingedAt', () => {
     ].join('\n');
     expect(parseStalePingedAt(body)).toBe(STALE_DATE_FIXTURE);
   });
+
+  // WR-06 — parseStalePingedAt must NOT return arbitrary \S+ tokens; the
+  // captured value flows directly into businessDaysBetween arithmetic, where
+  // a non-ISO date throws RangeError. PR bodies are human-editable, so a
+  // typo or a stale value from another system using the same comment prefix
+  // is a realistic attack surface. Treat any marker whose value is not a
+  // strictly anchored YYYY-MM-DD as if the marker were absent (return null).
+  describe('WR-06 — value-shape validation', () => {
+    it('returns null for malformed-date marker value (garbage-not-a-date)', () => {
+      expect(
+        parseStalePingedAt('<!-- pr-bot:stale_pinged_at=garbage-not-a-date -->'),
+      ).toBeNull();
+    });
+
+    it('returns null for partial-ISO marker value (missing day component)', () => {
+      expect(parseStalePingedAt('<!-- pr-bot:stale_pinged_at=2026-05 -->')).toBeNull();
+    });
+
+    it('returns null for ISO-shaped value with the wrong separators', () => {
+      expect(parseStalePingedAt('<!-- pr-bot:stale_pinged_at=2026/05/08 -->')).toBeNull();
+      expect(parseStalePingedAt('<!-- pr-bot:stale_pinged_at=2026-5-8 -->')).toBeNull();
+    });
+
+    it('returns null for trailing-garbage values that share an ISO prefix', () => {
+      // The anchored shape /^\d{4}-\d{2}-\d{2}$/ rejects appended chars too —
+      // ambiguity here would let a manual edit smuggle in extra tokens.
+      expect(parseStalePingedAt('<!-- pr-bot:stale_pinged_at=2026-05-08T09:00:00Z -->')).toBeNull();
+    });
+
+    it('still returns valid ISO-8601 date values', () => {
+      expect(parseStalePingedAt('<!-- pr-bot:stale_pinged_at=2026-05-08 -->')).toBe('2026-05-08');
+      expect(parseStalePingedAt('<!-- pr-bot:stale_pinged_at=2099-12-31 -->')).toBe('2099-12-31');
+    });
+  });
 });
 
 describe('marker.serializeStalePingedAt + round-trip', () => {
