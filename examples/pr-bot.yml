@@ -43,7 +43,13 @@ on:
     - cron: '0 14 * * 1-5'
 
 jobs:
-  notify:
+  # Webhook-event path (pull_request, pull_request_review, issue_comment,
+  # pull_request_review_comment). Distinct from the schedule-event path so the
+  # per-repo stale-check concurrency group does NOT serialize webhook traffic.
+  # Webhook events for different PRs MUST run concurrently — notify.yml's own
+  # job-level concurrency provides per-PR keying. See BL-01 (Plan 03.1 REVIEW).
+  notify-events:
+    if: github.event_name != 'schedule'
     # Phase 2 sandbox: pin to main on the sandbox PR-BOT repo (Pitfall 3).
     # Phase 4 transitions to @v1 mutable major tag at the company-org PR-BOT.
     uses: Slaanesh233-sandbox/PR-BOT/.github/workflows/notify.yml@main
@@ -56,14 +62,21 @@ jobs:
     #   "The workflow is requesting 'pull-requests: write', but is only
     #    allowed 'pull-requests: none'."
     permissions:
-      pull-requests: write   # PATCH PR body to inject markers (OPEN-05 + STALE-01)
+      pull-requests: write   # PATCH PR body to inject markers (OPEN-05)
       contents: read         # read repo metadata
-    # Concurrency: one stale-check (or webhook event) at a time per repo.
-    # Webhook events use the per-PR group from notify.yml's job; the schedule path
-    # is keyed per-repo so two cron-fired runs never race on each other's PATCHes.
-    # See plan 03.1-03 canonical_caller_stub_target for the design rationale; the
-    # job-level group is acceptably broader than notify.yml's per-PR group because
-    # cron runs typically finish in seconds.
+    secrets: inherit
+
+  # Schedule-event path (stale-check cron). Per-repo concurrency group keyed
+  # on github.repository so two cron-fired runs (e.g. overlapping ticks if a
+  # run pages slow) never race on each other's PR-body PATCHes. Webhook events
+  # are handled by notify-events above and are NOT affected by this lock.
+  # See plan 03.1-03 canonical_caller_stub_target for the design rationale.
+  notify-stale-check:
+    if: github.event_name == 'schedule'
+    uses: Slaanesh233-sandbox/PR-BOT/.github/workflows/notify.yml@main
+    permissions:
+      pull-requests: write   # PATCH PR body to inject stale markers (STALE-01)
+      contents: read         # read repo metadata
     concurrency:
       group: ${{ github.repository }}-stale-check
       cancel-in-progress: false
