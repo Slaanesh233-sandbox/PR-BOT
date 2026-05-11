@@ -34,6 +34,13 @@ on:
     types: [created]
   pull_request_review_comment:
     types: [created]
+  schedule:
+    # Phase 3.1 STALE-01 — cron-fired stale-PR reminder.
+    # 9am ET Mon-Fri only. Webhook events keep firing 24/7; only this cron is time-gated.
+    # Default-on per CONTEXT.md Decision 3 — owners control which repos enroll via the
+    # rollout list, not via per-repo opt-out. Repos that should NOT receive stale-check
+    # are excluded from the rollout list rather than editing this stub.
+    - cron: '0 14 * * 1-5'
 
 jobs:
   notify:
@@ -49,6 +56,15 @@ jobs:
     #   "The workflow is requesting 'pull-requests: write', but is only
     #    allowed 'pull-requests: none'."
     permissions:
-      pull-requests: write   # PATCH PR body to inject the marker (OPEN-05)
+      pull-requests: write   # PATCH PR body to inject markers (OPEN-05 + STALE-01)
       contents: read         # read repo metadata
+    # Concurrency: one stale-check (or webhook event) at a time per repo.
+    # Webhook events use the per-PR group from notify.yml's job; the schedule path
+    # is keyed per-repo so two cron-fired runs never race on each other's PATCHes.
+    # See plan 03.1-03 canonical_caller_stub_target for the design rationale; the
+    # job-level group is acceptably broader than notify.yml's per-PR group because
+    # cron runs typically finish in seconds.
+    concurrency:
+      group: ${{ github.repository }}-stale-check
+      cancel-in-progress: false
     secrets: inherit
