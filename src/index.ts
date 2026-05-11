@@ -78,6 +78,7 @@ import {
   buildRootMessage,
   buildStrikethroughRoot,
   buildThreadReply,
+  businessDaysBetween,
   classify,
   formatCloseReply,
   formatMergeReply,
@@ -86,12 +87,18 @@ import {
   formatReopenReply,
   formatReviewCommentReply,
   formatReviewReply,
+  formatStalePingReply,
   inject as injectMarker,
+  injectStalePingCount,
+  injectStalePingedAt,
   isBotActor,
   isSilent,
   loadChannelConfig,
+  loadStaleCheckConfig,
   loadUsersMap,
   parse as parseMarker,
+  parseStalePingCount,
+  parseStalePingedAt,
   pickApprovedEmoji,
   resolve as resolveMention,
   resolveAll as resolveAllMentions,
@@ -102,11 +109,26 @@ import {
   type ReopenSummary,
   type ResolvedMention,
   type RoutedEvent,
+  type StaleCheckConfig,
   type TerminalSummary,
   type UsersMap,
 } from './lib/index.js';
 
 // --- Public DI seam --------------------------------------------------------
+
+// Phase 3.1 — narrow list-item shape returned by octokit.rest.pulls.list. We
+// deliberately enumerate only the fields handleStaleCheck reads. FLT-06(a)
+// discipline: pull-request title and branch refs (head.ref / base.ref) are
+// intentionally absent — the dispatcher must not access them.
+export interface PullListItem {
+  readonly number: number;
+  readonly html_url: string;
+  readonly body: string | null;
+  readonly draft: boolean;
+  readonly user: { readonly login: string; readonly type: string } | null;
+  readonly requested_reviewers: ReadonlyArray<{ readonly login: string }> | null;
+  readonly created_at: string;
+}
 
 export interface Deps {
   readonly slack: {
@@ -158,12 +180,24 @@ export interface Deps {
           pull_number: number;
           body: string;
         }): Promise<unknown>;
+        // Phase 3.1 — paginated PR discovery for the schedule-event path.
+        list(args: {
+          owner: string;
+          repo: string;
+          state: 'open' | 'closed' | 'all';
+          per_page?: number;
+          page?: number;
+        }): Promise<{ data: ReadonlyArray<PullListItem> }>;
       };
     };
   };
   readonly config: {
     readonly users: UsersMap;
     readonly channel: ChannelConfig;
+    // Phase 3.1 — optional so existing tests (and the webhook path) don't need
+    // to populate it. Schedule-event execution requires it; handleStaleCheck
+    // defensively setFailed's if missing.
+    readonly staleCheck?: StaleCheckConfig;
   };
   readonly logger: {
     info(msg: string): void;
@@ -172,6 +206,12 @@ export interface Deps {
   };
   // Injectable sleep (tests pass () => {} to fast-forward retry delays).
   readonly sleep?: (ms: number) => Promise<void>;
+  // Phase 3.1 — injectable clock (tests pass a fixed-date thunk so business-day
+  // arithmetic is deterministic). Defaults to () => new Date() at runtime.
+  readonly now?: () => Date;
+  // Phase 3.1 — schedule-event fallback owner/repo when ctx is absent. Webhook
+  // path reads ctx.event.repo; schedule path can use either ctx or this.
+  readonly repo?: { readonly owner: string; readonly repo: string };
 }
 
 export interface HandleEventCtx {
@@ -931,6 +971,208 @@ async function patchWithRetry(
   // Note: OBS-04 (Phase 5) will add a visible Slack message when this happens.
 }
 
+// === Phase 3.1 — schedule-event handler (STALE-01) =========================
+//
+// handleStaleCheck is dispatched by main() when context.eventName === 'schedule'.
+// The webhook event router (handleEvent) is untouched — schedule events do not
+// carry a webhook payload, so the dispatcher takes a different shape (no PR in
+// payload; PRs discovered via octokit.rest.pulls.list).
+//
+// The 9-step filter chain mirrors REQUIREMENTS.md STALE-01 canonical order:
+//   1. thread_ts marker required  (no-marker)
+//   2. silent opt-out             (silent-marker)
+//   3. not draft                  (draft)
+//   4. not bot author             (bot-author)        — FLT-01 parity via isBotActor
+//   5. not too old                (too-old)           — calendar days
+//   6. stale enough               (too-young)         — business days
+//   7. reping cooldown elapsed    (reping-cooldown)   — business days since last ping
+//   8. today not a holiday        (holiday)           — checked once at run start
+//   9. ping budget remaining      (max-pings-reached)
+//
+// Eligible PRs receive a thread-reply ping + PR-body PATCH (stale_pinged_at +
+// stale_ping_count markers). Failures on one PR do not abort the loop — each
+// PR is independent. STAT-01 re-lock invariant: handleStaleCheck does NOT call
+// the Slack reaction-add or reaction-remove APIs (the new code path is
+// reaction-free; root reactions remain reserved for terminal-state events).
+const PULLS_LIST_PAGE_SIZE = 100;
+
+export async function handleStaleCheck(deps: Deps, ctx?: HandleEventCtx): Promise<void> {
+  const cfg = deps.config.staleCheck;
+  if (!cfg) {
+    deps.logger.setFailed(
+      'handleStaleCheck: deps.config.staleCheck not loaded (config/stale-check.yml — see Plan 03.1-01)',
+    );
+    return;
+  }
+
+  const eventRepo = ctx?.event.repo ?? deps.repo;
+  if (!eventRepo) {
+    deps.logger.setFailed(
+      'handleStaleCheck: no owner/repo available (provide ctx.event.repo or deps.repo)',
+    );
+    return;
+  }
+  const { owner, repo } = eventRepo;
+  const now = (deps.now ?? (() => new Date()))();
+  const todayISO = now.toISOString().slice(0, 10);
+  const holidaysSet = new Set(cfg.holidays);
+
+  // Filter step 8 — short-circuits the WHOLE run before any I/O when today
+  // itself is a holiday (extra safety guard beyond the cron's Mon-Fri pattern).
+  if (holidaysSet.has(todayISO)) {
+    deps.logger.info(`stale-check: today (${todayISO}) is a holiday; entire run skipped`);
+    return;
+  }
+
+  // Discover candidate PRs via paginated pulls.list.
+  const allPrs: PullListItem[] = [];
+  let page = 1;
+  while (true) {
+    let resp: { data: ReadonlyArray<PullListItem> };
+    try {
+      resp = await deps.octokit.rest.pulls.list({
+        owner,
+        repo,
+        state: 'open',
+        per_page: PULLS_LIST_PAGE_SIZE,
+        page,
+      });
+    } catch (err) {
+      deps.logger.setFailed(
+        `stale-check: pulls.list failed at page ${page}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return;
+    }
+    const batch = resp.data ?? [];
+    if (batch.length === 0) break;
+    allPrs.push(...batch);
+    if (batch.length < PULLS_LIST_PAGE_SIZE) break;
+    page++;
+  }
+  deps.logger.info(`stale-check: ${allPrs.length} open PRs to consider`);
+
+  for (const pr of allPrs) {
+    await processOnePrForStaleCheck(deps, owner, repo, pr, cfg, holidaysSet, todayISO, now);
+  }
+}
+
+async function processOnePrForStaleCheck(
+  deps: Deps,
+  owner: string,
+  repo: string,
+  pr: PullListItem,
+  cfg: StaleCheckConfig,
+  holidays: ReadonlySet<string>,
+  todayISO: string,
+  now: Date,
+): Promise<void> {
+  const body = pr.body ?? '';
+  const prNumber = pr.number;
+
+  // Filter step 1: thread_ts marker required (bot doesn't own pre-install PRs).
+  const threadTs = parseMarker(body);
+  if (threadTs === null) {
+    deps.logger.info(`stale-check skipped: no-marker (PR #${prNumber})`);
+    return;
+  }
+
+  // Filter step 2: silent opt-out (FLT-02 parity).
+  if (isSilent(body)) {
+    deps.logger.info(`stale-check skipped: silent-marker (PR #${prNumber})`);
+    return;
+  }
+
+  // Filter step 3: drafts.
+  if (pr.draft === true) {
+    deps.logger.info(`stale-check skipped: draft (PR #${prNumber})`);
+    return;
+  }
+
+  // Filter step 4: bot author (FLT-01 parity — isBotActor handles both
+  // type='Bot' and the login-suffix belt-and-braces case).
+  if (isBotActor(pr.user)) {
+    deps.logger.info(`stale-check skipped: bot-author (PR #${prNumber})`);
+    return;
+  }
+
+  // Filter step 5: too old (calendar days).
+  const createdAtMs = new Date(pr.created_at).getTime();
+  if (Number.isFinite(createdAtMs)) {
+    const ageDays = (now.getTime() - createdAtMs) / (24 * 60 * 60 * 1000);
+    if (ageDays > cfg.maxAgeDays) {
+      deps.logger.info(
+        `stale-check skipped: too-old (PR #${prNumber}, age=${Math.round(ageDays)}d)`,
+      );
+      return;
+    }
+  }
+
+  // Filter step 6: too young (business days).
+  const createdAtISO = pr.created_at.slice(0, 10);
+  const businessDaysOpen = businessDaysBetween(createdAtISO, todayISO, holidays);
+  if (businessDaysOpen < cfg.staleThresholdBusinessDays) {
+    deps.logger.info(
+      `stale-check skipped: too-young (PR #${prNumber}, business_days_open=${businessDaysOpen})`,
+    );
+    return;
+  }
+
+  // Filter step 7: reping cooldown.
+  const lastPinged = parseStalePingedAt(body);
+  if (lastPinged !== null) {
+    const sinceLastPing = businessDaysBetween(lastPinged, todayISO, holidays);
+    if (sinceLastPing < cfg.repingIntervalBusinessDays) {
+      deps.logger.info(
+        `stale-check skipped: reping-cooldown (PR #${prNumber}, business_days_since_last=${sinceLastPing})`,
+      );
+      return;
+    }
+  }
+
+  // Filter step 8 already handled at the run-level; per-PR is a no-op here.
+
+  // Filter step 9: max pings reached. Marker value is a STRING (D-02 / FND-06
+  // parity); integer-parse exactly once via Number.parseInt with explicit
+  // radix and NaN-fallback to 0.
+  const countStr = parseStalePingCount(body);
+  const parsedCount = countStr === null ? 0 : Number.parseInt(countStr, 10);
+  const safeCurrentCount = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 0;
+  if (safeCurrentCount >= cfg.maxPingsPerPr) {
+    deps.logger.info(
+      `stale-check skipped: max-pings-reached (PR #${prNumber}, count=${safeCurrentCount})`,
+    );
+    return;
+  }
+
+  // Eligible — fire the ping (thread reply only; root-reaction-free per
+  // STAT-01 re-lock 2026-05-08).
+  const warn = (msg: string): void => deps.logger.warning(msg);
+  const authorLogin = pr.user?.login ?? '';
+  const authorMention = resolveMention(authorLogin, deps.config.users, { warn });
+  const reviewerLogins: GitHubLogin[] = (pr.requested_reviewers ?? [])
+    .map((r) => r.login)
+    .filter((l): l is string => typeof l === 'string' && l.length > 0);
+  const reviewerMentions = resolveAllMentions(reviewerLogins, deps.config.users, { warn });
+
+  const replyText = formatStalePingReply({ businessDaysOpen, authorMention, reviewerMentions });
+  const reply = buildThreadReply({ text: replyText });
+  const channel = deps.config.channel.channel;
+
+  const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
+  if (!postOk) return; // postThreadReply already tier-mapped the error.
+
+  // Increment count + write both new markers via the existing patchWithRetry.
+  const nextCount = safeCurrentCount + 1;
+  const newBody = injectStalePingCount(injectStalePingedAt(body, todayISO), String(nextCount));
+  await patchWithRetry(deps, owner, repo, prNumber, newBody);
+
+  deps.logger.info(
+    `posted stale-ping for PR #${prNumber} (business_days_open=${businessDaysOpen}, ping_count=${nextCount})`,
+  );
+}
+
 // --- Bootstrap (only runs in production; test envs short-circuit) ----------
 
 export async function main(): Promise<void> {
@@ -951,9 +1193,22 @@ export async function main(): Promise<void> {
 
     const usersYaml = fs.readFileSync('config/users.yml', 'utf8');
     const channelYaml = fs.readFileSync('config/channel.yml', 'utf8');
+    // Phase 3.1 — stale-check config is optional at file level so local dev
+    // and ad-hoc test environments don't crash if the YAML is absent. In
+    // production, tests/config-schema.test.ts enforces the on-disk shape; an
+    // absent file in production is a setup bug surfaced by the defensive
+    // setFailed inside handleStaleCheck.
+    let staleCheck: StaleCheckConfig | undefined;
+    try {
+      const staleCheckYaml = fs.readFileSync('config/stale-check.yml', 'utf8');
+      staleCheck = loadStaleCheckConfig(staleCheckYaml);
+    } catch {
+      staleCheck = undefined;
+    }
     const config = {
       users: loadUsersMap(usersYaml),
       channel: loadChannelConfig(channelYaml),
+      staleCheck,
     };
 
     const slack = new WebClient(slackToken);
@@ -986,7 +1241,14 @@ export async function main(): Promise<void> {
         },
       },
       octokit: {
-        rest: { pulls: { get: octokit.rest.pulls.get, update: octokit.rest.pulls.update } },
+        rest: {
+          pulls: {
+            get: octokit.rest.pulls.get,
+            update: octokit.rest.pulls.update,
+            // Phase 3.1 — pulls.list for the schedule-event PR-discovery loop.
+            list: octokit.rest.pulls.list,
+          },
+        },
       } as Deps['octokit'],
       config,
       logger: {
@@ -994,15 +1256,29 @@ export async function main(): Promise<void> {
         warning: (m) => core.warning(m),
         setFailed: (m) => core.setFailed(m),
       },
+      repo: context.repo,
     };
 
-    await handleEvent(deps, {
-      event: {
-        name: context.eventName,
-        payload: context.payload as HandleEventCtx['event']['payload'],
-        repo: context.repo,
-      },
-    });
+    // Phase 3.1 — schedule events do not carry a webhook payload; route to the
+    // dedicated stale-check entry point BEFORE the webhook dispatcher. Webhook
+    // events fall through to handleEvent as before.
+    if (context.eventName === 'schedule') {
+      await handleStaleCheck(deps, {
+        event: {
+          name: 'schedule',
+          payload: {},
+          repo: context.repo,
+        },
+      });
+    } else {
+      await handleEvent(deps, {
+        event: {
+          name: context.eventName,
+          payload: context.payload as HandleEventCtx['event']['payload'],
+          repo: context.repo,
+        },
+      });
+    }
   } catch (err) {
     core.setFailed(err instanceof Error ? err.message : String(err));
   }

@@ -9,12 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import {
-  handleEvent,
-  handleStaleCheck,
-  type Deps,
-  type HandleEventCtx,
-} from '../src/index.js';
+import { handleEvent, handleStaleCheck, type Deps, type HandleEventCtx } from '../src/index.js';
 import { loadStaleCheckConfig, type StaleCheckConfig } from '../src/lib/index.js';
 
 const SAMPLE_TS = '1700000000.000100'; // FND-06 trailing-zero fixture
@@ -1587,9 +1582,7 @@ describe('handleStaleCheck — happy path ping copy', () => {
     const { deps, spies } = makeMockDeps({
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([
-        fakePr({ number: 81, reviewerLogins: ['reviewer'] }),
-      ]),
+      pullsListImpl: singlePagePullsList([fakePr({ number: 81, reviewerLogins: ['reviewer'] })]),
     });
     await handleStaleCheck(deps, SANDBOX_REPO_CTX);
     const args = spies.postMessage.mock.calls[0]![0] as {
@@ -1623,9 +1616,7 @@ describe('handleStaleCheck — happy path ping copy', () => {
     const { deps, spies } = makeMockDeps({
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([
-        fakePr({ number: 83, reviewerLogins: ['r1', 'r2'] }),
-      ]),
+      pullsListImpl: singlePagePullsList([fakePr({ number: 83, reviewerLogins: ['r1', 'r2'] })]),
     });
     await handleStaleCheck(deps, SANDBOX_REPO_CTX);
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
@@ -1640,9 +1631,7 @@ describe('handleStaleCheck — happy path ping copy', () => {
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
       users: { kai: KAI_SLACK_ID }, // reviewer 'mystery' deliberately absent
-      pullsListImpl: singlePagePullsList([
-        fakePr({ number: 84, reviewerLogins: ['mystery'] }),
-      ]),
+      pullsListImpl: singlePagePullsList([fakePr({ number: 84, reviewerLogins: ['mystery'] })]),
     });
     await handleStaleCheck(deps, SANDBOX_REPO_CTX);
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
@@ -1660,10 +1649,7 @@ describe('handleStaleCheck — error paths', () => {
     const { deps, spies } = makeMockDeps({
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([
-        fakePr({ number: 91 }),
-        fakePr({ number: 92 }),
-      ]),
+      pullsListImpl: singlePagePullsList([fakePr({ number: 91 }), fakePr({ number: 92 })]),
       postMessageImpl: async () => {
         postCount++;
         if (postCount === 1) throw new Error('not_in_channel');
@@ -1697,10 +1683,7 @@ describe('handleStaleCheck — error paths', () => {
     const { deps, spies } = makeMockDeps({
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([
-        fakePr({ number: 94 }),
-        fakePr({ number: 95 }),
-      ]),
+      pullsListImpl: singlePagePullsList([fakePr({ number: 94 }), fakePr({ number: 95 })]),
       postMessageImpl: async () => {
         count++;
         if (count === 1) return { ok: false, error: 'rate_limited' };
@@ -1740,10 +1723,7 @@ describe('handleStaleCheck — error paths', () => {
     const { deps, spies } = makeMockDeps({
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([
-        fakePr({ number: 97 }),
-        fakePr({ number: 98 }),
-      ]),
+      pullsListImpl: singlePagePullsList([fakePr({ number: 97 }), fakePr({ number: 98 })]),
       pullsUpdateImpl: async () => {
         count++;
         if (count === 1) {
@@ -1791,8 +1771,7 @@ describe('handleStaleCheck — stale_ping_count increment semantics', () => {
 
   it('count marker present but garbage (NaN) → treated as 0; new value is 1', async () => {
     const body =
-      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
-      `<!-- pr-bot:stale_ping_count=garbage -->`;
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` + `<!-- pr-bot:stale_ping_count=garbage -->`;
     const { deps, spies } = makeMockDeps({
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
