@@ -1432,6 +1432,58 @@ describe('handleStaleCheck — filter step 4: bot author (FLT-01 parity)', () =>
   });
 });
 
+// WR-05 — malformed pr.created_at must be rejected at filter step 5 with a
+// structured info/warning log; the subsequent businessDaysBetween call must
+// NOT receive a malformed slice. The WR-01 outer try/catch is the floor; this
+// inner guard is the first line of defense and avoids relying on RangeError.
+describe('handleStaleCheck — WR-05 malformed pr.created_at', () => {
+  it('non-ISO created_at → skipped with malformed-created_at log; no postMessage; subsequent PR still pinged', async () => {
+    const prs: FakePr[] = [
+      fakePr({ number: 301, createdAtISO: 'not-a-date-at-all' }),
+      fakePr({ number: 302 }), // eligible
+    ];
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList(prs),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    // Step-5 inner guard hits first; no RangeError reaches the outer catch.
+    // The log line must name the PR + the reason; warning OR info channel
+    // acceptable so long as the message is present somewhere visible.
+    const allLogs = [
+      ...spies.info.mock.calls.map((c) => String(c[0])),
+      ...spies.warning.mock.calls.map((c) => String(c[0])),
+    ];
+    expect(allLogs.some((line) => /malformed-created_at.*301|#301.*malformed/i.test(line))).toBe(
+      true,
+    );
+    // Loop continued: PR #302 pinged.
+    expect(spies.pullsUpdate.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const pullNumbers = spies.pullsUpdate.mock.calls.map(
+      (c) => (c[0] as { pull_number: number }).pull_number,
+    );
+    expect(pullNumbers).toContain(302);
+    expect(pullNumbers).not.toContain(301);
+  });
+
+  it('empty-string created_at → skipped with malformed-created_at log', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([fakePr({ number: 303, createdAtISO: '' })]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.pullsUpdate).not.toHaveBeenCalled();
+    const allLogs = [
+      ...spies.info.mock.calls.map((c) => String(c[0])),
+      ...spies.warning.mock.calls.map((c) => String(c[0])),
+    ];
+    expect(allLogs.some((line) => /malformed-created_at|#303.*malformed/i.test(line))).toBe(true);
+  });
+});
+
 describe('handleStaleCheck — filter step 5: max age (calendar days)', () => {
   it('created 31 calendar days ago → skipped with reason too-old', async () => {
     // 2026-04-13 is 31 days before 2026-05-14
