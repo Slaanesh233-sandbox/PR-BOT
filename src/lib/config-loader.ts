@@ -18,6 +18,7 @@
 
 import { parse as parseYaml } from 'yaml';
 
+import { computeUsFederalHolidays } from './business-days.js';
 import {
   CHANNEL_ID_REGEX,
   type ChannelConfig,
@@ -108,17 +109,32 @@ export function loadChannelConfig(yamlText: string): ChannelConfig {
 //   - reping_interval_business_days = 2
 //   - max_pings_per_pr = 3
 //
-// holidays defaults to [] when absent (the cron's Mon-Fri schedule restriction
-// + business-day filter cover the baseline; admins append company-specific
-// days as needed).
+// Holidays (Plan 03.1-04 — auto-computed US-federal merge):
+//   - US-federal holidays for the next 5 years (inclusive of the current UTC
+//     year) are auto-computed by `computeUsFederalHolidays` in
+//     business-days.ts and ALWAYS merged into the returned `holidays` array.
+//   - YAML `holidays:` is purely ADDITIVE — admins list company-specific
+//     dates (year-end shutdowns, founders' day) and those are merged on top.
+//   - Duplicates between YAML extras and auto-computed federal dates are
+//     silently deduped; result is sorted ascending in ISO-8601 order.
+//   - Self-extending across the bot's lifetime; no manual annual refresh.
 
-const STALE_CHECK_DEFAULTS: StaleCheckConfig = {
-  holidays: [],
+// Plan 03.1-04: holidays is no longer materialized as a default constant —
+// it's computed at load time so the current UTC year drives the auto-computed
+// US-federal window. The non-holiday defaults remain locked from CONTEXT.md.
+const STALE_CHECK_NON_HOLIDAY_DEFAULTS = {
   staleThresholdBusinessDays: 3,
   maxAgeDays: 30,
   repingIntervalBusinessDays: 2,
   maxPingsPerPr: 3,
-};
+} as const;
+
+// Number of years (inclusive of baseYear) for which US-federal holidays are
+// auto-computed and merged into the on-disk YAML's `holidays:` array.
+// 5 years ahead means the loader generates [now, now+5] = 6 calendar years of
+// federal holidays at each invocation. Self-extending; no manual annual
+// refresh required.
+const STALE_CHECK_HOLIDAY_YEARS_AHEAD = 5;
 
 // Strict anchored ISO-8601 date regex. Shared with the marker validator for
 // stale_pinged_at (Plan 03.1-02 import).
@@ -163,7 +179,13 @@ function requireNonNegativeInteger(field: string, value: unknown): number {
  * Schema:
  *   - top-level mapping (object); empty/null body allowed (returns all defaults)
  *   - `holidays`: array of ISO-8601 date strings matching /^\d{4}-\d{2}-\d{2}$/.
- *     Default: [] (no extra holidays beyond the cron's Mon-Fri restriction).
+ *     **ADDITIVE (Plan 03.1-04):** the YAML list is merged with the
+ *     auto-computed US-federal-holiday set (5 years ahead, self-extending,
+ *     produced by `computeUsFederalHolidays` in business-days.ts). Admins
+ *     list company-specific dates only (year-end shutdown weeks, founders'
+ *     day, regional office closures); duplicates with auto-computed federal
+ *     dates are silently deduped. Default: [] additive entries (the
+ *     auto-computed federal set is always present).
  *   - `stale_threshold_business_days`: non-negative integer (0 = every
  *     eligible PR is stale immediately, no minimum-age window); default 3.
  *     The D3 relaxation from positive-integer is required by the Phase 3.1
@@ -182,15 +204,26 @@ function requireNonNegativeInteger(field: string, value: unknown): number {
  * (same D-17 pattern as loadUsersMap / loadChannelConfig).
  *
  * Defaults source: CONTEXT.md "Implementation defaults the planner should
- * ship as-is" section.
+ * ship as-is" section. Holiday-merge semantics: Plan 03.1-04 — purely
+ * additive YAML, US-federal auto-computed.
  */
 export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
   const parsed = parseYaml(yamlText) as unknown;
 
-  // Empty / null / undefined YAML → all defaults. Treat the file as an empty
-  // mapping so omitted-key paths below resolve uniformly.
+  // Auto-computed US-federal holiday set. Generated for the next
+  // STALE_CHECK_HOLIDAY_YEARS_AHEAD years (inclusive of the current UTC year);
+  // self-extending across the bot's lifetime so admins never need to refresh
+  // this list manually.
+  const autoFederal = computeUsFederalHolidays({
+    yearsAhead: STALE_CHECK_HOLIDAY_YEARS_AHEAD,
+  });
+
+  // Empty / null / undefined YAML body → no YAML extras; auto-federal alone.
   if (parsed === null || parsed === undefined) {
-    return STALE_CHECK_DEFAULTS;
+    return {
+      holidays: Object.freeze([...autoFederal]),
+      ...STALE_CHECK_NON_HOLIDAY_DEFAULTS,
+    };
   }
   if (typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(
@@ -206,15 +239,16 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
     max_pings_per_pr?: unknown;
   };
 
-  // holidays — array of ISO date strings; default [].
-  let holidays: readonly string[] = STALE_CHECK_DEFAULTS.holidays;
+  // YAML holidays — additive extras. Validate strictly (same anchored ISO
+  // regex as before) BEFORE merging with the auto-computed federal set, so
+  // a malformed YAML entry still HARD-FAILS regardless of what auto produces.
+  const yamlExtras: string[] = [];
   if (root.holidays !== undefined && root.holidays !== null) {
     if (!Array.isArray(root.holidays)) {
       throw new Error(
         `stale-check.yml schema: holidays must be an array, got ${typeof root.holidays}`,
       );
     }
-    const out: string[] = [];
     for (let i = 0; i < root.holidays.length; i += 1) {
       const entry = root.holidays[i];
       if (typeof entry !== 'string') {
@@ -227,14 +261,19 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
           `stale-check.yml schema: holidays[${i}] ("${entry}") does not match ISO-8601 date regex /^\\d{4}-\\d{2}-\\d{2}$/`,
         );
       }
-      out.push(entry);
+      yamlExtras.push(entry);
     }
-    holidays = out;
   }
+
+  // Merge auto-federal + YAML extras: dedupe via Set, then sort ascending.
+  // Order in the result is canonical ISO ascending — independent of input
+  // ordering, so the consumer (businessDaysBetween) doesn't depend on YAML
+  // declaration order.
+  const merged = Object.freeze([...new Set([...autoFederal, ...yamlExtras])].sort());
 
   const staleThresholdBusinessDays =
     root.stale_threshold_business_days === undefined
-      ? STALE_CHECK_DEFAULTS.staleThresholdBusinessDays
+      ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.staleThresholdBusinessDays
       : requireNonNegativeInteger(
           'stale_threshold_business_days',
           root.stale_threshold_business_days,
@@ -242,12 +281,12 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
 
   const maxAgeDays =
     root.max_age_days === undefined
-      ? STALE_CHECK_DEFAULTS.maxAgeDays
+      ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.maxAgeDays
       : requirePositiveInteger('max_age_days', root.max_age_days);
 
   const repingIntervalBusinessDays =
     root.reping_interval_business_days === undefined
-      ? STALE_CHECK_DEFAULTS.repingIntervalBusinessDays
+      ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.repingIntervalBusinessDays
       : requireNonNegativeInteger(
           'reping_interval_business_days',
           root.reping_interval_business_days,
@@ -255,11 +294,11 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
 
   const maxPingsPerPr =
     root.max_pings_per_pr === undefined
-      ? STALE_CHECK_DEFAULTS.maxPingsPerPr
+      ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.maxPingsPerPr
       : requirePositiveInteger('max_pings_per_pr', root.max_pings_per_pr);
 
   return {
-    holidays,
+    holidays: merged,
     staleThresholdBusinessDays,
     maxAgeDays,
     repingIntervalBusinessDays,
