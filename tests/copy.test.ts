@@ -27,6 +27,7 @@ import {
   formatRequestedReviewReply,
   formatReviewCommentReply,
   formatReviewReply,
+  formatStaleFinalPingReply,
   formatStalePingReply,
   pickApprovedEmoji,
 } from '../src/lib/copy.js';
@@ -295,5 +296,152 @@ describe('formatStalePingReply (STALE-01 — locked copy 2026-05-08, CONTEXT.md 
         reviewerMentions: [mapped('<@UMapped>'), fallback('@unmapped', 'unmapped')],
       }),
     ).toBe('📬 this PR has been open for 5 business days.\n  cc <@UAuth> <@UMapped> @unmapped');
+  });
+});
+
+describe('formatStaleFinalPingReply (STALE-01 — Plan 03.1-05 final-ping escalation copy, locked 2026-05-12)', () => {
+  // User verbatim direction (session 4, 2026-05-12):
+  //   "First ping should be happening after PR is opened for 1 week. Second on
+  //    3rd week. And final msg saying something like PR is already 1 month
+  //    old, final ping, and will no longer be tracked. Please author to
+  //    escalate, etc."
+  // Test surface locks the four required substrings (📬 / final / no longer
+  // be tracked / escalate) + the author-mention-distinct-from-cc structure.
+  // Wording flexibility on "1 month" / "4 weeks" / "30 days" is intentional;
+  // 'escalate' is the locked term capturing the user direction.
+
+  const mapped = (text: string, login = 'u'): ResolvedMention => ({ kind: 'mapped', text, login });
+  const fallback = (text: string, login = 'u'): ResolvedMention => ({
+    kind: 'fallback',
+    text,
+    login,
+  });
+
+  it('zero reviewers → contains 📬 + /final/i + /no longer be tracked/i + authorMention.text; NO cc clause', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 20,
+      authorMention: mapped('<@UAuth>'),
+      reviewerMentions: [],
+    });
+    expect(out).toContain('📬');
+    expect(out).toMatch(/final/i);
+    expect(out).toMatch(/no longer be tracked/i);
+    expect(out).toContain('<@UAuth>');
+    // Zero-reviewer edge case: omit the `cc ` clause entirely; author-direct
+    // address on line 2 carries the ask alone.
+    expect(out).not.toMatch(/\bcc /);
+  });
+
+  it('one reviewer → cc clause contains the single reviewer; author mention NOT inside cc clause', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 20,
+      authorMention: mapped('<@UAuth>'),
+      reviewerMentions: [mapped('<@URev1>')],
+    });
+    expect(out).toMatch(/\bcc <@URev1>/);
+    // Author mention should appear on its own escalation line, not inside
+    // the cc clause: split on 'cc ' and verify <@UAuth> appears BEFORE 'cc'.
+    const ccIndex = out.indexOf('cc ');
+    const authorIndex = out.indexOf('<@UAuth>');
+    expect(authorIndex).toBeGreaterThanOrEqual(0);
+    expect(ccIndex).toBeGreaterThan(authorIndex);
+    // <@UAuth> appears exactly once in the output.
+    expect(out.split('<@UAuth>').length - 1).toBe(1);
+  });
+
+  it('three reviewers → cc clause contains all three reviewer mentions in input order, single-space-joined', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 20,
+      authorMention: mapped('<@UAuth>'),
+      reviewerMentions: [mapped('<@URev1>'), mapped('<@URev2>'), mapped('<@URev3>')],
+    });
+    expect(out).toMatch(/\bcc <@URev1> <@URev2> <@URev3>/);
+    // Author mention is NOT inside the cc clause; appears once on the
+    // escalation line that precedes 'cc '.
+    const ccStart = out.indexOf('cc <@URev1>');
+    const tail = out.slice(ccStart);
+    expect(tail.includes('<@UAuth>')).toBe(false);
+  });
+
+  it('N=20 renders as "20 business days" (explicit integer; no thousand-separator; no float)', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 20,
+      authorMention: mapped('<@UAuth>'),
+      reviewerMentions: [mapped('<@URev1>')],
+    });
+    expect(out).toContain('20 business days');
+  });
+
+  it('N=0 renders as "0 business days" (D2 floor parity — dispatcher controls when this can occur)', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 0,
+      authorMention: mapped('<@UAuth>'),
+      reviewerMentions: [],
+    });
+    expect(out).toContain('0 business days');
+  });
+
+  it('throws RangeError on businessDaysOpen=-1 (negative integer) and NaN (non-integer)', () => {
+    expect(() =>
+      formatStaleFinalPingReply({
+        businessDaysOpen: -1,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [],
+      }),
+    ).toThrow(/non-negative integer/);
+    expect(() =>
+      formatStaleFinalPingReply({
+        businessDaysOpen: Number.NaN,
+        authorMention: mapped('<@UAuth>'),
+        reviewerMentions: [],
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it('fallback-kind author mention flows through unchanged via .text (FLT-05 inheritance)', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 20,
+      authorMention: fallback('@kai', 'kai'),
+      reviewerMentions: [],
+    });
+    expect(out).toContain('@kai');
+    expect(out).toMatch(/final/i);
+    expect(out).toMatch(/no longer be tracked/i);
+  });
+
+  it('mixed mapped + fallback reviewer mentions all flow through via .text in input order', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 20,
+      authorMention: mapped('<@UAuth>'),
+      reviewerMentions: [mapped('<@UMapped>'), fallback('@unmapped', 'unmapped')],
+    });
+    expect(out).toMatch(/\bcc <@UMapped> @unmapped/);
+  });
+
+  it('author-direct escalation line is distinct from the cc reviewer line (≥2 newlines)', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 20,
+      authorMention: mapped('<@UAuth>'),
+      reviewerMentions: [mapped('<@URev1>')],
+    });
+    // Output is ≥3 lines (header, escalation, cc) when there is ≥1 reviewer.
+    const lines = out.split('\n');
+    expect(lines.length).toBeGreaterThanOrEqual(3);
+    // Find the escalation line containing <@UAuth>; the cc line containing
+    // <@URev1> must come AFTER and not contain <@UAuth>.
+    const authorLineIdx = lines.findIndex((l) => l.includes('<@UAuth>'));
+    const ccLineIdx = lines.findIndex((l) => l.includes('<@URev1>'));
+    expect(authorLineIdx).toBeGreaterThanOrEqual(0);
+    expect(ccLineIdx).toBeGreaterThan(authorLineIdx);
+    expect(lines[ccLineIdx]!.includes('<@UAuth>')).toBe(false);
+  });
+
+  it('output text matches /escalate/i (locks the user-verbatim "please author to escalate" direction)', () => {
+    const out = formatStaleFinalPingReply({
+      businessDaysOpen: 20,
+      authorMention: mapped('<@UAuth>'),
+      reviewerMentions: [mapped('<@URev1>')],
+    });
+    expect(out).toMatch(/escalate/i);
   });
 });
