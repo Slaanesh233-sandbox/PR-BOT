@@ -261,10 +261,140 @@ describe('loadStaleCheckConfig — negative cases (HARD-FAIL on schema violation
   });
 });
 
+// === Plan 03.1-05 — ping_schedule_business_days schema migration =============
+//
+// The three v1 fields (stale_threshold_business_days, reping_interval_business_days,
+// max_pings_per_pr) are REPLACED by a single ping_schedule_business_days array.
+// Validators: array of non-negative integers, length 1..10, strictly monotonically
+// increasing. Default when key absent: [5, 15, 20] (week 1 + week 3 + ~month 1).
+// See .planning/phases/03.1-stale-pr-reminders/03.1-05-PLAN.md.
+
+describe('loadStaleCheckConfig — ping_schedule_business_days validator (Plan 03.1-05 schema migration)', () => {
+  it('ping_schedule_business_days absent → defaults to [5, 15, 20]', () => {
+    const cfg = loadStaleCheckConfig('max_age_days: 30\n');
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([5, 15, 20]);
+  });
+
+  it('ping_schedule_business_days: [5, 15, 20] → returns the same array verbatim', () => {
+    const cfg = loadStaleCheckConfig('ping_schedule_business_days: [5, 15, 20]\n');
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([5, 15, 20]);
+  });
+
+  it('ping_schedule_business_days: [0] → accepted (single-entry; first ping is final)', () => {
+    const cfg = loadStaleCheckConfig('ping_schedule_business_days: [0]\n');
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([0]);
+  });
+
+  it('ping_schedule_business_days: [3] → accepted (single-entry; one ping only)', () => {
+    const cfg = loadStaleCheckConfig('ping_schedule_business_days: [3]\n');
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([3]);
+  });
+
+  it('ping_schedule_business_days: [1..10] → accepted at length=10 boundary', () => {
+    const cfg = loadStaleCheckConfig(
+      'ping_schedule_business_days: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]\n',
+    );
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it('ping_schedule_business_days: [] → throws (length >= 1)', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: []\n')).toThrow(
+      /ping_schedule_business_days.*length >= 1/,
+    );
+  });
+
+  it('ping_schedule_business_days length 11 → throws (length <= 10)', () => {
+    expect(() =>
+      loadStaleCheckConfig('ping_schedule_business_days: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]\n'),
+    ).toThrow(/ping_schedule_business_days.*length <= 10/);
+  });
+
+  it('ping_schedule_business_days: "5" (string) → throws (must be an array)', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: "5"\n')).toThrow(
+      /ping_schedule_business_days.*must be an array/,
+    );
+  });
+
+  it('ping_schedule_business_days: {a: 1} (object) → throws (must be an array)', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days:\n  a: 1\n')).toThrow(
+      /ping_schedule_business_days.*must be an array/,
+    );
+  });
+
+  it('ping_schedule_business_days: [5, 15, "20"] (string entry) → throws on entry[2]', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: [5, 15, "20"]\n')).toThrow(
+      /ping_schedule_business_days\[2\].*non-negative integer/,
+    );
+  });
+
+  it('ping_schedule_business_days: [5, 15.5, 20] (float entry) → throws on entry[1]', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: [5, 15.5, 20]\n')).toThrow(
+      /ping_schedule_business_days\[1\].*non-negative integer/,
+    );
+  });
+
+  it('ping_schedule_business_days: [5, .nan, 20] (NaN entry) → throws on entry[1]', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: [5, .nan, 20]\n')).toThrow(
+      /ping_schedule_business_days\[1\]/,
+    );
+  });
+
+  it('ping_schedule_business_days: [-1] (negative) → throws on entry[0]', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: [-1]\n')).toThrow(
+      /ping_schedule_business_days\[0\].*non-negative integer/,
+    );
+  });
+
+  it('ping_schedule_business_days: [5, 4] (decreasing) → throws strictly monotonic', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: [5, 4]\n')).toThrow(
+      /ping_schedule_business_days.*strictly monotonically increasing/,
+    );
+  });
+
+  it('ping_schedule_business_days: [5, 5] (duplicate) → throws strictly monotonic', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: [5, 5]\n')).toThrow(
+      /ping_schedule_business_days.*strictly monotonically increasing/,
+    );
+  });
+
+  it('ping_schedule_business_days: [5, 15, 10] (third decreases) → throws on entry[2] vs entry[1]', () => {
+    expect(() => loadStaleCheckConfig('ping_schedule_business_days: [5, 15, 10]\n')).toThrow(
+      /ping_schedule_business_days.*strictly monotonically increasing/,
+    );
+  });
+
+  it('full-explicit YAML — ping_schedule_business_days + max_age_days + holidays → returns typed config', () => {
+    const yaml = [
+      'ping_schedule_business_days: [7, 14, 21]',
+      'max_age_days: 45',
+      'holidays:',
+      '  - 2026-12-26',
+      '',
+    ].join('\n');
+    const cfg = loadStaleCheckConfig(yaml);
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([7, 14, 21]);
+    expect(cfg.maxAgeDays).toBe(45);
+    expect(cfg.holidays).toContain('2026-12-26');
+    // Auto-merged US-federal still present.
+    expect(cfg.holidays).toContain('2026-12-25');
+  });
+});
+
 describe('config/stale-check.yml on-disk schema (HARD-FAIL gate)', () => {
   it('parses cleanly via loadStaleCheckConfig (STALE-01)', () => {
     const yamlText = readFileSync(resolvePath(repoRoot, 'config/stale-check.yml'), 'utf-8');
     expect(() => loadStaleCheckConfig(yamlText)).not.toThrow();
+  });
+
+  it('returns the v1.1 pingScheduleBusinessDays default ([5, 15, 20]) after the schema migration', () => {
+    const yamlText = readFileSync(resolvePath(repoRoot, 'config/stale-check.yml'), 'utf-8');
+    const cfg = loadStaleCheckConfig(yamlText);
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([5, 15, 20]);
+    expect(cfg.maxAgeDays).toBe(30);
+    // Holidays remain auto-merged with US-federal (Plan 03.1-04 carry-forward).
+    expect(cfg.holidays.length).toBeGreaterThanOrEqual(50);
+    // Sanity: a known US-federal entry (Christmas 2026) is in the merged list.
+    expect(cfg.holidays).toContain('2026-12-25');
   });
 
   it('returns the auto-computed US-federal holidays merged with any additive YAML entries (Plan 03.1-04)', () => {
