@@ -7,10 +7,17 @@
 // data and assertions. CI Gate 7 scopes its grep to `src/`; tests/ is W-02 exempt — see
 // .github/workflows/ci.yml Gate 7 inline comment for rationale.
 
+import { readFileSync } from 'node:fs';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { handleEvent, handleStaleCheck, type Deps, type HandleEventCtx } from '../src/index.js';
 import { loadStaleCheckConfig, type StaleCheckConfig } from '../src/lib/index.js';
+
+// Used by the STAT-01 invariant test below to read src/index.ts as text.
+const repoRootForHandlerTests = resolvePath(dirname(fileURLToPath(import.meta.url)), '..');
 
 const SAMPLE_TS = '1700000000.000100'; // FND-06 trailing-zero fixture
 const KAI_SLACK_ID = 'U0B20676JVB';
@@ -1249,15 +1256,20 @@ describe('handleEvent — FLT-02 + THRD-07 ALSO apply on terminal events', () =>
 // effect are exercised in isolation from main()'s YAML-loading boilerplate.
 //
 // Fixed test "today" = 2026-05-14T14:00:00Z (Thursday). The injected
-// staleCheckConfig sets defaults (3/30/2/3) with an empty holiday list except
-// where a specific test substitutes a list that includes today.
+// staleCheckConfig sets the Plan 03.1-05 v1.1 defaults
+// (pingScheduleBusinessDays=[5, 15, 20]; maxAgeDays=30) with an empty holiday
+// list except where a specific test substitutes a list that includes today.
 //
 // The pr.created_at fixtures are designed so businessDaysBetween produces the
-// boundary value each test wants:
-//   - 2026-05-11 (Mon) → 3 business days vs today (Mon, Tue, Wed) = stale
-//   - 2026-05-12 (Tue) → 2 business days = too young (default threshold 3)
-//   - 2026-05-13 (Wed) → 1 business day = too young
-//   - 2026-04-13 (Mon, 31 calendar days ago) → too old at MAX_AGE_DAYS=30
+// boundary value each test wants. KEY ANCHORS for Plan 03.1-05 schedule
+// [5, 15, 20] against today Thu 2026-05-14:
+//   - 2026-05-07 (Thu, 1 week before)  → 5 business days = schedule[0] boundary
+//   - 2026-05-08 (Fri)                 → 4 business days = too-young vs [0]=5
+//   - 2026-04-23 (Thu, 3 weeks before) → 15 business days = schedule[1] boundary
+//   - 2026-04-24 (Fri)                 → 14 business days = too-young vs [1]=15
+//   - 2026-04-21 (Tue)                 → 17 business days (cron-miss catchup)
+//   - 2026-04-16 (Thu, 4 weeks before) → 20 business days = schedule[2] boundary
+//   - 2026-04-13 (Mon, 31 calendar d.) → too-old at MAX_AGE_DAYS=30
 
 const STALE_TODAY = new Date('2026-05-14T14:00:00Z');
 const STALE_TODAY_ISO = '2026-05-14';
@@ -1265,10 +1277,8 @@ const fixedNow = (): Date => STALE_TODAY;
 
 const STALE_CFG_DEFAULT: StaleCheckConfig = {
   holidays: [],
-  staleThresholdBusinessDays: 3,
   maxAgeDays: 30,
-  repingIntervalBusinessDays: 2,
-  maxPingsPerPr: 3,
+  pingScheduleBusinessDays: [5, 15, 20],
 };
 
 const SANDBOX_REPO_CTX: HandleEventCtx = {
@@ -1302,8 +1312,10 @@ interface FakePr {
 
 function fakePr(opts: FakePrOpts = {}): FakePr {
   const number = opts.number ?? 7;
-  // Default: PR opened on Monday 2026-05-11 → 3 business days vs Thursday "today" = stale enough.
-  const createdAt = opts.createdAtISO ?? '2026-05-11T09:00:00Z';
+  // Default: PR opened on Thursday 2026-05-07 → 5 business days vs Thursday
+  // "today" 2026-05-14 = schedule[0] boundary under Plan 03.1-05 [5, 15, 20]
+  // → fires ping-1 when currentPingCount=0.
+  const createdAt = opts.createdAtISO ?? '2026-05-07T09:00:00Z';
   const authorLogin = opts.authorLogin ?? 'kai';
   const authorType = opts.authorType ?? 'User';
   const reviewerLogins = opts.reviewerLogins ?? [];
@@ -1630,7 +1642,7 @@ describe('handleStaleCheck — filter step 9: max pings reached', () => {
 });
 
 describe('handleStaleCheck — happy path ping copy', () => {
-  it('eligible PR → postMessage text contains literal envelope emoji + "3 business days" + author mention', async () => {
+  it('eligible PR → postMessage text contains literal envelope emoji + "5 business days" + author mention', async () => {
     const { deps, spies } = makeMockDeps({
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
@@ -1646,7 +1658,7 @@ describe('handleStaleCheck — happy path ping copy', () => {
     expect(args.channel).toBe(SANDBOX_CHANNEL_ID);
     expect(args.thread_ts).toBe(SAMPLE_TS);
     expect(args.text).toContain('this PR has been open for');
-    expect(args.text).toContain('3 business days');
+    expect(args.text).toContain('5 business days');
     expect(args.text).toContain(`<@${KAI_SLACK_ID}>`); // author and reviewer both map to KAI_SLACK_ID
     expect(args.blocks).toBeDefined();
   });
@@ -1660,7 +1672,7 @@ describe('handleStaleCheck — happy path ping copy', () => {
     await handleStaleCheck(deps, SANDBOX_REPO_CTX);
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
     expect(args.text).toBe(
-      `📬 this PR has been open for 3 business days.\n  cc <@${KAI_SLACK_ID}>`,
+      `📬 this PR has been open for 5 business days.\n  cc <@${KAI_SLACK_ID}>`,
     );
   });
 
@@ -1674,7 +1686,7 @@ describe('handleStaleCheck — happy path ping copy', () => {
     const args = spies.postMessage.mock.calls[0]![0] as { text: string };
     // All three users map to KAI_SLACK_ID via the default users map
     expect(args.text).toBe(
-      `📬 this PR has been open for 3 business days.\n  cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>`,
+      `📬 this PR has been open for 5 business days.\n  cc <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}> <@${KAI_SLACK_ID}>`,
     );
   });
 
@@ -1953,6 +1965,339 @@ describe('handleStaleCheck — WR-01 per-PR error isolation', () => {
       (call) => (call[0] as { pull_number: number }).pull_number,
     );
     expect(pullNumbers).toContain(202);
+  });
+});
+
+// === Plan 03.1-05 — schedule eligibility + final-ping dispatch ==============
+//
+// New eligibility model (replaces old steps 6/7/9): fire ping K (1-indexed,
+// K = currentPingCount + 1) when businessDaysOpen >= schedule[K-1] AND
+// currentPingCount === K-1. Otherwise short-circuit with:
+//   - 'too-young'  when businessDaysOpen < schedule[currentPingCount]
+//   - 'max-pings-reached' when currentPingCount >= schedule.length
+// Final-ping iff K === schedule.length; dispatcher selects
+// formatStaleFinalPingReply instead of formatStalePingReply.
+//
+// Date math (today Thu 2026-05-14 against an empty holiday list):
+//   - opened 2026-05-07 (Thu) → 5 business days  = schedule[0] boundary
+//   - opened 2026-05-08 (Fri) → 4 business days  = too-young vs [0]=5
+//   - opened 2026-04-23 (Thu) → 15 business days = schedule[1] boundary
+//   - opened 2026-04-24 (Fri) → 14 business days = too-young vs [1]=15
+//   - opened 2026-04-21 (Tue) → 17 business days = cron-miss catchup w/ count=1
+//   - opened 2026-04-16 (Thu) → 20 business days = schedule[2] boundary
+
+describe('handleStaleCheck — Plan 03.1-05 schedule eligibility — first-ping (count=0)', () => {
+  it('schedule [5, 15, 20], PR opened 5 business days ago, count=0 → fires ping-1 (intermediate)', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 401, createdAtISO: '2026-05-07T09:00:00Z' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const text = (spies.postMessage.mock.calls[0]![0] as { text: string }).text;
+    // Intermediate copy (NOT final).
+    expect(text).not.toMatch(/final/i);
+    expect(text).not.toMatch(/no longer be tracked/i);
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain(`<!-- pr-bot:stale_pinged_at=${STALE_TODAY_ISO} -->`);
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=1 -->');
+  });
+
+  it('schedule [5, 15, 20], PR opened 4 business days ago, count=0 → skipped too-young; log contains next_threshold=5', async () => {
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 402, createdAtISO: '2026-05-08T09:00:00Z' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/too-young/));
+    // Spelling-safety: a typo like 'next_threshhold' would not match this.
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/next_threshold=5/));
+  });
+});
+
+describe('handleStaleCheck — Plan 03.1-05 schedule eligibility — second-ping (count=1)', () => {
+  it('schedule [5, 15, 20], PR opened 15 business days ago, count=1 → fires ping-2 (intermediate)', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-04-30 -->\n` +
+      `<!-- pr-bot:stale_ping_count=1 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 411, createdAtISO: '2026-04-23T09:00:00Z', body }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const text = (spies.postMessage.mock.calls[0]![0] as { text: string }).text;
+    expect(text).not.toMatch(/final/i);
+    expect(text).toContain('15 business days');
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=2 -->');
+  });
+
+  it('schedule [5, 15, 20], PR opened 14 business days ago, count=1 → skipped too-young; log contains next_threshold=15', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-04-30 -->\n` +
+      `<!-- pr-bot:stale_ping_count=1 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 412, createdAtISO: '2026-04-24T09:00:00Z', body }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/too-young/));
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/next_threshold=15/));
+  });
+});
+
+describe('handleStaleCheck — Plan 03.1-05 schedule eligibility — final-ping (count=2; schedule.length=3)', () => {
+  it('schedule [5, 15, 20], PR opened 20 business days ago, count=2 → fires ping-3 FINAL', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-05 -->\n` +
+      `<!-- pr-bot:stale_ping_count=2 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 421, createdAtISO: '2026-04-16T09:00:00Z', body }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const text = (spies.postMessage.mock.calls[0]![0] as { text: string }).text;
+    expect(text).toMatch(/final/i);
+    expect(text).toMatch(/no longer be tracked/i);
+    expect(text).toMatch(/escalate/i);
+    expect(text).toContain('20 business days');
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=3 -->');
+    expect(updateArgs.body).toContain(`<!-- pr-bot:stale_pinged_at=${STALE_TODAY_ISO} -->`);
+  });
+});
+
+describe('handleStaleCheck — Plan 03.1-05 schedule eligibility — cron-miss catchup', () => {
+  it('schedule [5, 15, 20], PR opened 17 business days ago, count=1 → fires ping-2 (no leap-forward to ping-3)', async () => {
+    // K-1 alignment: businessDaysOpen=17 >= schedule[1]=15 AND ping_count=1 === 2-1 → fires ping-2.
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-04-30 -->\n` +
+      `<!-- pr-bot:stale_ping_count=1 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 431, createdAtISO: '2026-04-21T09:00:00Z', body }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const text = (spies.postMessage.mock.calls[0]![0] as { text: string }).text;
+    // INTERMEDIATE — not final, because schedule.length=3 and nextCount=2.
+    expect(text).not.toMatch(/final/i);
+    expect(text).toContain('17 business days');
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=2 -->');
+  });
+});
+
+describe('handleStaleCheck — Plan 03.1-05 schedule eligibility — max-pings (count >= schedule.length)', () => {
+  it('schedule [5, 15, 20], PR opened 20 business days ago, count=3 → skipped max-pings-reached', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-13 -->\n` +
+      `<!-- pr-bot:stale_ping_count=3 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 441, createdAtISO: '2026-04-16T09:00:00Z', body }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/max-pings-reached/));
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/schedule_length=3/));
+  });
+
+  it('schedule [5, 15, 20], count=4 (> schedule.length) → skipped max-pings-reached', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-13 -->\n` +
+      `<!-- pr-bot:stale_ping_count=4 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 442, createdAtISO: '2026-04-16T09:00:00Z', body }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/max-pings-reached/));
+  });
+});
+
+describe('handleStaleCheck — Plan 03.1-05 schedule eligibility — single-entry schedule [0]', () => {
+  it('schedule [0], PR opened today (0 business days), count=0 → fires ping-1 FINAL (single-entry: first ping is also last)', async () => {
+    const cfg: StaleCheckConfig = {
+      holidays: [],
+      maxAgeDays: 30,
+      pingScheduleBusinessDays: [0],
+    };
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: cfg,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 451, createdAtISO: '2026-05-14T09:00:00Z' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(1);
+    const text = (spies.postMessage.mock.calls[0]![0] as { text: string }).text;
+    expect(text).toMatch(/final/i);
+    expect(text).toMatch(/no longer be tracked/i);
+    expect(text).toContain('0 business days');
+    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
+    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=1 -->');
+  });
+
+  it('schedule [0], same PR with count=1 → skipped max-pings-reached (count >= schedule.length=1)', async () => {
+    const cfg: StaleCheckConfig = {
+      holidays: [],
+      maxAgeDays: 30,
+      pingScheduleBusinessDays: [0],
+    };
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=${STALE_TODAY_ISO} -->\n` +
+      `<!-- pr-bot:stale_ping_count=1 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: cfg,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 452, createdAtISO: '2026-05-14T09:00:00Z', body }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).not.toHaveBeenCalled();
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/max-pings-reached/));
+    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/schedule_length=1/));
+  });
+});
+
+describe('handleStaleCheck — Plan 03.1-05 final-ping dispatch (formatStaleFinalPingReply selection)', () => {
+  it('nextCount === schedule.length → postMessage text matches /final/i AND /no longer be tracked/i', async () => {
+    const body =
+      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+      `<!-- pr-bot:stale_pinged_at=2026-05-05 -->\n` +
+      `<!-- pr-bot:stale_ping_count=2 -->`;
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 461, createdAtISO: '2026-04-16T09:00:00Z', body }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const text = (spies.postMessage.mock.calls[0]![0] as { text: string }).text;
+    expect(text).toMatch(/final/i);
+    expect(text).toMatch(/no longer be tracked/i);
+  });
+
+  it('nextCount < schedule.length → postMessage text does NOT match /final/i', async () => {
+    // count=0 → nextCount=1; schedule.length=3. Not final.
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 462, createdAtISO: '2026-05-07T09:00:00Z' }),
+      ]),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    const text = (spies.postMessage.mock.calls[0]![0] as { text: string }).text;
+    expect(text).not.toMatch(/final/i);
+    expect(text).not.toMatch(/no longer be tracked/i);
+  });
+});
+
+describe('handleStaleCheck — Plan 03.1-05 progression through full schedule', () => {
+  it('3 eligible PRs (count=0/1/2) → 3 postMessage calls; first two intermediate, third final; count progresses 1/2/3', async () => {
+    const bodyForCount = (count: number, ago: string): string => {
+      if (count === 0) return `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->`;
+      return (
+        `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
+        `<!-- pr-bot:stale_pinged_at=${ago} -->\n` +
+        `<!-- pr-bot:stale_ping_count=${count} -->`
+      );
+    };
+    const prs = [
+      fakePr({
+        number: 471,
+        createdAtISO: '2026-05-07T09:00:00Z',
+        body: bodyForCount(0, ''),
+        reviewerLogins: ['reviewer'],
+      }),
+      fakePr({
+        number: 472,
+        createdAtISO: '2026-04-23T09:00:00Z',
+        body: bodyForCount(1, '2026-04-30'),
+        reviewerLogins: ['reviewer'],
+      }),
+      fakePr({
+        number: 473,
+        createdAtISO: '2026-04-16T09:00:00Z',
+        body: bodyForCount(2, '2026-05-05'),
+        reviewerLogins: ['reviewer'],
+      }),
+    ];
+    const { deps, spies } = makeMockDeps({
+      now: fixedNow,
+      staleCheck: STALE_CFG_DEFAULT,
+      pullsListImpl: singlePagePullsList(prs),
+    });
+    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
+    expect(spies.postMessage).toHaveBeenCalledTimes(3);
+    const t1 = (spies.postMessage.mock.calls[0]![0] as { text: string }).text;
+    const t2 = (spies.postMessage.mock.calls[1]![0] as { text: string }).text;
+    const t3 = (spies.postMessage.mock.calls[2]![0] as { text: string }).text;
+    expect(t1).not.toMatch(/final/i);
+    expect(t2).not.toMatch(/final/i);
+    expect(t3).toMatch(/final/i);
+    // pulls.update progresses count 1, 2, 3.
+    const counts = spies.pullsUpdate.mock.calls.map((c) => {
+      const m = /stale_ping_count=(\d+)/.exec((c[0] as { body: string }).body);
+      return m ? Number.parseInt(m[1]!, 10) : -1;
+    });
+    expect(counts).toEqual([1, 2, 3]);
+  });
+});
+
+// STAT-01 re-lock 2026-05-08 regression guard: handleStaleCheck must not add
+// or remove any root reactions. The narrow-regex count on the source file
+// stays at 23 (the canonical Phase-3 baseline). The broader regex returns 24
+// because it also matches a doc-comment / log-string reference; only the
+// narrow API-call-site count is gated.
+describe('STAT-01 reactions-count invariant (Plan 03.1-05 regression guard)', () => {
+  it('grep -cE "reactions.(add|remove)" src/index.ts === 23 (Phase-3 baseline preserved)', () => {
+    const src = readFileSync(resolvePath(repoRootForHandlerTests, 'src/index.ts'), 'utf-8');
+    // Count occurrences of either ".reactions.add" or ".reactions.remove" via a
+    // narrow regex matching the canonical API call shape.
+    const matches = src.match(/reactions\.(add|remove)/g) ?? [];
+    expect(matches.length).toBe(23);
   });
 });
 
