@@ -1,4 +1,16 @@
-# Stale-check config — STALE-01 v1.0.
+# Stale-check config — STALE-01 v1.1 (Plan 03.1-05 — 2026-05-12).
+#
+# ping_schedule_business_days: 1-indexed schedule of business-day thresholds at
+# which stale-PR pings fire. The LAST entry triggers the final-ping escalation
+# copy ("no longer be tracked" + please escalate). Validators (enforced by
+# loadStaleCheckConfig in src/lib/config-loader.ts):
+#   - array of non-negative integers
+#   - length within [1, 10] inclusive
+#   - strictly monotonically increasing (no duplicates, no decreases)
+#
+# Default cadence: [5, 15, 20] business days = week 1 + week 3 + ~month 1.
+# Eligibility: fire ping K (1-indexed) when businessDaysOpen >= schedule[K-1]
+# AND currentPingCount === K-1.
 #
 # US-federal holidays are auto-computed (5 years ahead, self-extending) by
 # src/lib/business-days.ts:computeUsFederalHolidays — no manual refresh needed.
@@ -11,17 +23,9 @@
 # (year-end shutdown weeks, founders' day, regional office closures, etc.).
 # Format: ISO-8601 YYYY-MM-DD per line; strict anchored regex enforced.
 # Duplicates with auto-computed federal dates are silently deduped.
-#
-# Schema (D3-formalized 2026-05-11):
-#   stale_threshold_business_days  >= 0  (0 = immediately eligible)
-#   reping_interval_business_days  >= 0  (0 = no cooldown; emits startup warning)
-#   max_age_days                   >  0  (positive integer)
-#   max_pings_per_pr               >  0  (positive integer)
 
-stale_threshold_business_days: 3
+ping_schedule_business_days: [5, 15, 20]
 max_age_days: 30
-reping_interval_business_days: 2
-max_pings_per_pr: 3
 # holidays:
 #   - 2026-12-24 # example: Pirros year-end shutdown start
 #   - 2026-12-25 # already in US-federal list — dedup is fine
