@@ -1,40 +1,28 @@
-# Stale-check config — Phase 3.1 STALE-01.
+# Stale-check config — STALE-01 v1.0.
 #
-# Schema validated by tests/config-schema.test.ts via loadStaleCheckConfig.
-# Defaults applied if a key is absent: stale_threshold_business_days=3,
-# max_age_days=30, reping_interval_business_days=2, max_pings_per_pr=3.
+# US-federal holidays are auto-computed (5 years ahead, self-extending) by
+# src/lib/business-days.ts:computeUsFederalHolidays — no manual refresh needed.
+# Eleven holidays per year: New Year's Day, MLK, Presidents, Memorial,
+# Juneteenth, Independence Day, Labor, Columbus / Indigenous Peoples',
+# Veterans, Thanksgiving, Christmas. Federal observed-shift rule applied to
+# fixed-date holidays (Sat → preceding Fri; Sun → following Mon).
 #
-# Field bounds (D3 relaxation):
-#   - stale_threshold_business_days: non-negative integer (>= 0). 0 means
-#     every eligible PR is stale immediately (no minimum-age window).
-#   - max_age_days: positive integer (>= 1).
-#   - reping_interval_business_days: non-negative integer (>= 0). 0 means
-#     no cooldown between pings; every cron run re-pings eligible PRs,
-#     capped only by max_pings_per_pr. PRODUCTION SAFETY: setting 0 is
-#     risky on a frequent cron — a runtime warning fires at startup.
-#   - max_pings_per_pr: positive integer (>= 1).
+# The `holidays:` array below is ADDITIVE — list company-specific dates here
+# (year-end shutdown weeks, founders' day, regional office closures, etc.).
+# Format: ISO-8601 YYYY-MM-DD per line; strict anchored regex enforced.
+# Duplicates with auto-computed federal dates are silently deduped.
 #
-# The `holidays:` list is ISO-8601 date strings (YYYY-MM-DD). Strict regex
-# /^\d{4}-\d{2}-\d{2}$/. Append company-specific holidays (Pirros holidays,
-# year-end shutdown weeks, etc.) below the US federal list.
-#
-# v1 holiday list = US federal holidays for the next ~12 months from
-# 2026-05-08 (CONTEXT.md Decision 1).
+# Schema (D3-formalized 2026-05-11):
+#   stale_threshold_business_days  >= 0  (0 = immediately eligible)
+#   reping_interval_business_days  >= 0  (0 = no cooldown; emits startup warning)
+#   max_age_days                   >  0  (positive integer)
+#   max_pings_per_pr               >  0  (positive integer)
 
 stale_threshold_business_days: 3
 max_age_days: 30
 reping_interval_business_days: 2
 max_pings_per_pr: 3
-holidays:
-  - 2026-05-25 # Memorial Day
-  - 2026-07-03 # Independence Day (observed)
-  - 2026-09-07 # Labor Day
-  - 2026-10-12 # Indigenous Peoples' Day
-  - 2026-11-11 # Veterans Day
-  - 2026-11-26 # Thanksgiving
-  - 2026-11-27 # Day after Thanksgiving
-  - 2026-12-25 # Christmas
-  - 2027-01-01 # New Year's Day
-  - 2027-01-18 # MLK Day
-  - 2027-02-15 # Presidents' Day
-  - 2027-05-31 # Memorial Day
+# holidays:
+#   - 2026-12-24 # example: Pirros year-end shutdown start
+#   - 2026-12-25 # already in US-federal list — dedup is fine
+#   - 2026-12-31 # example: NYE office close
