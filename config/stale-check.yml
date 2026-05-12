@@ -24,7 +24,7 @@
 # Format: ISO-8601 YYYY-MM-DD per line; strict anchored regex enforced.
 # Duplicates with auto-computed federal dates are silently deduped.
 
-ping_schedule_business_days: [0]   # TEMP override for 03.1-05 sandbox session — DO NOT MERGE FORWARD
+ping_schedule_business_days: [5, 15, 20]
 max_age_days: 30
 # holidays:
 #   - 2026-12-24 # example: Pirros year-end shutdown start
