@@ -117,3 +117,167 @@ export function businessDaysBetween(start: string, end: string, holidays: Holida
   }
   return count;
 }
+
+// === Phase 3.1 polish — auto-computed US-federal holidays (Plan 03.1-04) =====
+//
+// Eleven federal holidays per year, generated for [baseYear, baseYear+yearsAhead]
+// inclusive. The YAML `holidays:` array in `config/stale-check.yml` becomes
+// ADDITIVE — admins list company-specific dates only (year-end shutdown weeks,
+// founders' day, regional office closures). Auto-computed list self-extends
+// every cron tick; no manual annual refresh required.
+//
+// Calendar rules:
+//   - Fixed-date holidays (New Year's Day, Juneteenth, Independence Day,
+//     Veterans Day, Christmas): the literal calendar date.
+//   - Floating-weekday holidays (MLK, Presidents, Memorial, Labor, Columbus,
+//     Thanksgiving): the nth occurrence (or LAST occurrence for Memorial) of
+//     the named weekday in the named month.
+//
+// Federal observed-shift rule for FIXED-date holidays only:
+//   - If the fixed date falls on Saturday → observed on the preceding Friday.
+//   - If the fixed date falls on Sunday   → observed on the following Monday.
+//   - Weekday-fall                        → no shift.
+//
+// Floating-weekday holidays NEVER need shifting (always a Mon/Thu by
+// construction). The shift may cross a year boundary — e.g. Jan 1 2022 falls
+// on Saturday and is therefore observed on Friday Dec 31 2021. The observed
+// date is what employees actually take off, so the helper emits it even when
+// it lands outside the [baseYear, baseYear+yearsAhead] window.
+//
+// All math is UTC-pure: Date.UTC + getUTCDay(). No locale-dependent
+// toLocaleDateString. Mirrors the existing module pattern from Phase 3.1-01.
+
+const WEEKDAY_SUN = 0;
+const WEEKDAY_MON = 1;
+const WEEKDAY_THU = 4;
+const WEEKDAY_SAT = 6;
+
+/**
+ * Build the ISO date of the nth occurrence of `targetDow` in `year`/`month`
+ * (1-indexed `month`). For example `nthWeekdayOfMonth(2026, 1, 1, 3)` is the
+ * 3rd Monday of January 2026.
+ */
+function nthWeekdayOfMonth(year: number, month: number, targetDow: number, n: number): string {
+  const firstMs = Date.UTC(year, month - 1, 1);
+  const firstDow = new Date(firstMs).getUTCDay();
+  // Day-of-month of the first occurrence of targetDow this month.
+  const firstOccurrence = 1 + ((targetDow - firstDow + 7) % 7);
+  const dayOfMonth = firstOccurrence + (n - 1) * 7;
+  return utcMsToIsoDate(Date.UTC(year, month - 1, dayOfMonth));
+}
+
+/**
+ * Build the ISO date of the LAST occurrence of `targetDow` in `year`/`month`.
+ * Used for Memorial Day (last Monday of May).
+ */
+function lastWeekdayOfMonth(year: number, month: number, targetDow: number): string {
+  // `month` is 1-indexed (Jan=1). Date.UTC(year, monthArg, 0) returns the
+  // millisecond timestamp of "day 0 of monthArg-zero-indexed" — i.e. the last
+  // day of the PREVIOUS zero-indexed month, which is exactly the last day of
+  // the 1-indexed `month` parameter. So passing `month` directly as the
+  // Date.UTC monthArg (since month-1+1 = month) gives the last day of the
+  // 1-indexed month. Verified by unit test (Memorial Day last Mon May 2026
+  // = May 25; 5/31/2026 is a Sunday → back 6 days = May 25).
+  const lastMs = Date.UTC(year, month, 0);
+  const lastDow = new Date(lastMs).getUTCDay();
+  const lastDate = new Date(lastMs).getUTCDate();
+  // Distance back to the most recent targetDow on/before the last day.
+  const back = (lastDow - targetDow + 7) % 7;
+  const dayOfMonth = lastDate - back;
+  return utcMsToIsoDate(Date.UTC(year, month - 1, dayOfMonth));
+}
+
+/**
+ * Apply the federal observed-shift rule to a fixed-date holiday.
+ * Saturday → preceding Friday. Sunday → following Monday. Weekday → no shift.
+ * Returns the observed ISO date (may differ in month/year from the input).
+ */
+function applyObservedShift(isoDate: string): string {
+  const ms = parseIsoDateToUtcMs(isoDate);
+  const dow = new Date(ms).getUTCDay();
+  if (dow === WEEKDAY_SAT) {
+    return utcMsToIsoDate(ms - ONE_DAY_MS);
+  }
+  if (dow === WEEKDAY_SUN) {
+    return utcMsToIsoDate(ms + ONE_DAY_MS);
+  }
+  return isoDate;
+}
+
+/**
+ * Return the current UTC year. Wrapped in a function (not a top-level const)
+ * so test fixtures and time-traveling callers may pin `baseYear` explicitly
+ * without baking the wall-clock year into module load.
+ */
+function currentUtcYear(): number {
+  return new Date().getUTCFullYear();
+}
+
+/**
+ * Compute the US-federal-holiday set for years [baseYear, baseYear+yearsAhead]
+ * inclusive. Returns ISO-8601 date strings sorted ascending, deduplicated.
+ *
+ * Eleven holidays per year:
+ *   - New Year's Day (Jan 1, observed-shifted)
+ *   - MLK Day (3rd Monday of January)
+ *   - Presidents Day (3rd Monday of February)
+ *   - Memorial Day (last Monday of May)
+ *   - Juneteenth (Jun 19, observed-shifted)
+ *   - Independence Day (Jul 4, observed-shifted)
+ *   - Labor Day (1st Monday of September)
+ *   - Columbus / Indigenous Peoples' Day (2nd Monday of October)
+ *   - Veterans Day (Nov 11, observed-shifted)
+ *   - Thanksgiving (4th Thursday of November)
+ *   - Christmas (Dec 25, observed-shifted)
+ *
+ * Defaults: `baseYear = currentUtcYear()`, `yearsAhead = 5`.
+ *
+ * Edge case: observed-shift may push a Jan-1 holiday into the previous
+ * calendar year (Jan 1 Sat → preceding Fri Dec 31 of prior year). The
+ * observed date is what employees actually take off, so this helper emits
+ * it even though it falls outside the nominal [baseYear, baseYear+yearsAhead]
+ * window. Symmetrically, a Dec-25 / Dec-31 holiday could in principle shift
+ * into the following year (Dec 25 Sat → preceding Fri Dec 24 stays in year;
+ * but a Jan-1-of-next-year computed at the end of the window may show up
+ * via the previous-year's New-Year's-Day generation — dedup handles this).
+ */
+export function computeUsFederalHolidays(opts?: {
+  yearsAhead?: number;
+  baseYear?: number;
+}): readonly string[] {
+  const yearsAhead = opts?.yearsAhead ?? 5;
+  const baseYear = opts?.baseYear ?? currentUtcYear();
+  const out = new Set<string>();
+  for (let y = baseYear; y <= baseYear + yearsAhead; y += 1) {
+    // Fixed-date holidays — apply observed-shift rule.
+    out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-01-01`)); // New Year's Day
+    out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-06-19`)); // Juneteenth
+    out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-07-04`)); // Independence Day
+    out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-11-11`)); // Veterans Day
+    out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-12-25`)); // Christmas
+    // Floating-weekday holidays — no shift (always a weekday by construction).
+    out.add(nthWeekdayOfMonth(y, 1, WEEKDAY_MON, 3)); // MLK Day — 3rd Mon Jan
+    out.add(nthWeekdayOfMonth(y, 2, WEEKDAY_MON, 3)); // Presidents Day — 3rd Mon Feb
+    out.add(lastWeekdayOfMonth(y, 5, WEEKDAY_MON)); // Memorial Day — last Mon May
+    out.add(nthWeekdayOfMonth(y, 9, WEEKDAY_MON, 1)); // Labor Day — 1st Mon Sep
+    out.add(nthWeekdayOfMonth(y, 10, WEEKDAY_MON, 2)); // Columbus / Indigenous Peoples' Day — 2nd Mon Oct
+    out.add(nthWeekdayOfMonth(y, 11, WEEKDAY_THU, 4)); // Thanksgiving — 4th Thu Nov
+  }
+  return Object.freeze([...out].sort());
+}
+
+/**
+ * Returns true iff `isoDate` is in the auto-computed US-federal-holiday set
+ * for the given window (default: current UTC year + 5).
+ *
+ * Throws RangeError on malformed input (same contract as isBusinessDay).
+ */
+export function isUsFederalHoliday(
+  isoDate: string,
+  opts?: { baseYear?: number; yearsAhead?: number },
+): boolean {
+  // Validate input shape eagerly — share the existing parser's error path.
+  parseIsoDateToUtcMs(isoDate);
+  const holidays = computeUsFederalHolidays(opts);
+  return holidays.includes(isoDate);
+}
