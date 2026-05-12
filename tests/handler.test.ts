@@ -1528,71 +1528,6 @@ describe('handleStaleCheck — filter step 5: max age (calendar days)', () => {
   });
 });
 
-describe('handleStaleCheck — filter step 6: too young (business days)', () => {
-  it('created Tuesday (2 business days vs today Thu) → skipped with reason too-young', async () => {
-    // 2026-05-12 is Tue. businessDaysBetween('2026-05-12','2026-05-14',[]) === 2 (Tue, Wed). 2<3.
-    const { deps, spies } = makeMockDeps({
-      now: fixedNow,
-      staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([
-        fakePr({ number: 41, createdAtISO: '2026-05-12T09:00:00Z' }),
-      ]),
-    });
-    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
-    expect(spies.postMessage).not.toHaveBeenCalled();
-    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/too-young/));
-  });
-
-  it('exactly STALE_THRESHOLD_BUSINESS_DAYS old (3 business days) → eligible (boundary)', async () => {
-    // 2026-05-11 (Mon) → businessDaysBetween('2026-05-11','2026-05-14',[]) === 3 (Mon,Tue,Wed).
-    const { deps, spies } = makeMockDeps({
-      now: fixedNow,
-      staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([
-        fakePr({ number: 42, createdAtISO: '2026-05-11T09:00:00Z' }),
-      ]),
-    });
-    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
-    expect(spies.postMessage).toHaveBeenCalledTimes(1);
-    expect(spies.info).not.toHaveBeenCalledWith(expect.stringMatching(/too-young/));
-  });
-});
-
-describe('handleStaleCheck — filter step 7: reping cooldown', () => {
-  it('stale_pinged_at = yesterday (1 business day, < REPING_INTERVAL=2) → reping-cooldown', async () => {
-    const body =
-      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
-      `<!-- pr-bot:stale_pinged_at=2026-05-13 -->\n` +
-      `<!-- pr-bot:stale_ping_count=1 -->`;
-    const { deps, spies } = makeMockDeps({
-      now: fixedNow,
-      staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([fakePr({ number: 51, body })]),
-    });
-    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
-    expect(spies.postMessage).not.toHaveBeenCalled();
-    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/reping-cooldown/));
-  });
-
-  it('stale_pinged_at from 3 business days ago (Mon) → eligible; ping fires with count=2', async () => {
-    // last_pinged='2026-05-11' (Mon), today='2026-05-14' (Thu) → businessDaysBetween=3 >= 2 → cleared.
-    const body =
-      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
-      `<!-- pr-bot:stale_pinged_at=2026-05-11 -->\n` +
-      `<!-- pr-bot:stale_ping_count=1 -->`;
-    const { deps, spies } = makeMockDeps({
-      now: fixedNow,
-      staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([fakePr({ number: 52, body })]),
-    });
-    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
-    expect(spies.postMessage).toHaveBeenCalledTimes(1);
-    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
-    expect(updateArgs.body).toContain(`<!-- pr-bot:stale_pinged_at=${STALE_TODAY_ISO} -->`);
-    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=2 -->');
-  });
-});
-
 describe('handleStaleCheck — filter step 8: today is a holiday', () => {
   it('todayISO in holidays list → entire run skipped, pulls.list NOT called', async () => {
     const cfg: StaleCheckConfig = { ...STALE_CFG_DEFAULT, holidays: [STALE_TODAY_ISO] };
@@ -1605,39 +1540,6 @@ describe('handleStaleCheck — filter step 8: today is a holiday', () => {
     expect(spies.postMessage).not.toHaveBeenCalled();
     expect(spies.pullsList).not.toHaveBeenCalled();
     expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/holiday/));
-  });
-});
-
-describe('handleStaleCheck — filter step 9: max pings reached', () => {
-  it('stale_ping_count=3 (== MAX_PINGS_PER_PR) → max-pings-reached', async () => {
-    const body =
-      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
-      `<!-- pr-bot:stale_pinged_at=2026-05-09 -->\n` +
-      `<!-- pr-bot:stale_ping_count=3 -->`;
-    const { deps, spies } = makeMockDeps({
-      now: fixedNow,
-      staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([fakePr({ number: 71, body })]),
-    });
-    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
-    expect(spies.postMessage).not.toHaveBeenCalled();
-    expect(spies.info).toHaveBeenCalledWith(expect.stringMatching(/max-pings-reached/));
-  });
-
-  it('stale_ping_count=2 (one remaining) → eligible; new count=3', async () => {
-    const body =
-      `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
-      `<!-- pr-bot:stale_pinged_at=2026-05-09 -->\n` +
-      `<!-- pr-bot:stale_ping_count=2 -->`;
-    const { deps, spies } = makeMockDeps({
-      now: fixedNow,
-      staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([fakePr({ number: 72, body })]),
-    });
-    await handleStaleCheck(deps, SANDBOX_REPO_CTX);
-    expect(spies.postMessage).toHaveBeenCalledTimes(1);
-    const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
-    expect(updateArgs.body).toContain('<!-- pr-bot:stale_ping_count=3 -->');
   });
 });
 
@@ -1818,6 +1720,12 @@ describe('handleStaleCheck — stale_ping_count increment semantics', () => {
   });
 
   it('count marker present (=1) → replace-in-place to =2', async () => {
+    // Plan 03.1-05: with schedule [5, 15, 20] and count=1, the PR must have
+    // businessDaysOpen >= schedule[1]=15 to fire ping-2. Use createdAt
+    // 2026-04-23 (Thu, 3 weeks before today Thu 2026-05-14) = 15 business
+    // days. Marker stale_pinged_at is preserved on the body but no longer
+    // consulted for eligibility (the dispatcher relies on the K-1 alignment
+    // between ping_count and schedule index).
     const body =
       `<!-- pr-bot:thread_ts=${SAMPLE_TS} -->\n` +
       `<!-- pr-bot:stale_pinged_at=2026-05-09 -->\n` +
@@ -1825,7 +1733,9 @@ describe('handleStaleCheck — stale_ping_count increment semantics', () => {
     const { deps, spies } = makeMockDeps({
       now: fixedNow,
       staleCheck: STALE_CFG_DEFAULT,
-      pullsListImpl: singlePagePullsList([fakePr({ number: 102, body })]),
+      pullsListImpl: singlePagePullsList([
+        fakePr({ number: 102, body, createdAtISO: '2026-04-23T09:00:00Z' }),
+      ]),
     });
     await handleStaleCheck(deps, SANDBOX_REPO_CTX);
     const updateArgs = spies.pullsUpdate.mock.calls[0]![0] as { body: string };
@@ -2293,26 +2203,29 @@ describe('handleStaleCheck — Plan 03.1-05 progression through full schedule', 
 // narrow API-call-site count is gated.
 describe('STAT-01 reactions-count invariant (Plan 03.1-05 regression guard)', () => {
   it('grep -cE "reactions.(add|remove)" src/index.ts === 23 (Phase-3 baseline preserved)', () => {
+    // Canonical metric is `grep -cE` (line-match count, NOT total occurrence
+    // count). Two of the source lines contain the regex twice (e.g. one
+    // `slack.reactions.add(... typeof slack.reactions.add ...)`), so a naive
+    // String.match-based count would report 24. The plan-checker gate runs
+    // grep -cE, so this test mirrors that semantic.
     const src = readFileSync(resolvePath(repoRootForHandlerTests, 'src/index.ts'), 'utf-8');
-    // Count occurrences of either ".reactions.add" or ".reactions.remove" via a
-    // narrow regex matching the canonical API call shape.
-    const matches = src.match(/reactions\.(add|remove)/g) ?? [];
-    expect(matches.length).toBe(23);
+    const re = /reactions\.(add|remove)/;
+    const lineCount = src.split(/\r?\n/).filter((line) => re.test(line)).length;
+    expect(lineCount).toBe(23);
   });
 });
 
 // Sanity check that the on-disk config still parses (parity with the
 // config-schema test, but exercised here so tests/handler.test.ts test budget
-// remains coherent).
+// remains coherent). Plan 03.1-05: assertions rewritten for the new schema
+// shape (ping_schedule_business_days replaces three v1 fields).
 describe('handleStaleCheck — on-disk config integration', () => {
-  it('loadStaleCheckConfig(yaml) returns 12 holidays + 4 locked thresholds (parity check)', () => {
+  it('loadStaleCheckConfig(yaml) parses the v1.1 schedule + max_age_days + additive holidays', () => {
     const cfg = loadStaleCheckConfig(
-      'stale_threshold_business_days: 3\nmax_age_days: 30\nreping_interval_business_days: 2\nmax_pings_per_pr: 3\nholidays:\n  - 2026-05-25\n',
+      'ping_schedule_business_days: [5, 15, 20]\nmax_age_days: 30\nholidays:\n  - 2026-05-25\n',
     );
-    expect(cfg.staleThresholdBusinessDays).toBe(3);
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([5, 15, 20]);
     expect(cfg.maxAgeDays).toBe(30);
-    expect(cfg.repingIntervalBusinessDays).toBe(2);
-    expect(cfg.maxPingsPerPr).toBe(3);
     expect(cfg.holidays).toContain('2026-05-25');
   });
 });

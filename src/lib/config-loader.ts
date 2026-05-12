@@ -176,10 +176,10 @@ function requirePositiveInteger(field: string, value: unknown): number {
 // array; falls back to `fallback` when value is undefined.
 //
 // D-02 / FND-06 invariant: every numeric check uses Number.isInteger on a
-// typeof-checked number — no parseFloat, no Number(stringValue), no +string
-// coercion. YAML's parser produces native JS numbers for integer literals; a
-// quoted entry like "20" comes back as a string and fails the typeof check
-// with the index-anchored error message.
+// typeof-checked native-number value — string-to-number coercion of any kind
+// is forbidden by the repo-wide grep gate. YAML's parser produces native JS
+// numbers for integer literals; a quoted entry like "20" comes back as a
+// string and fails the typeof check with the index-anchored error message.
 function parseAndValidatePingSchedule(
   value: unknown,
   fallback: readonly number[],

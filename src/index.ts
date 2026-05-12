@@ -87,6 +87,7 @@ import {
   formatReopenReply,
   formatReviewCommentReply,
   formatReviewReply,
+  formatStaleFinalPingReply,
   formatStalePingReply,
   inject as injectMarker,
   injectStalePingCount,
@@ -98,7 +99,6 @@ import {
   loadUsersMap,
   parse as parseMarker,
   parseStalePingCount,
-  parseStalePingedAt,
   pickApprovedEmoji,
   resolve as resolveMention,
   resolveAll as resolveAllMentions,
@@ -1155,45 +1155,55 @@ async function processOnePrForStaleCheck(
     return;
   }
 
-  // Filter step 6: too young (business days).
+  // Compute businessDaysOpen — used by the schedule check below. (Same
+  // right-exclusive businessDaysBetween call as before.)
   const createdAtISO = pr.created_at.slice(0, 10);
   const businessDaysOpen = businessDaysBetween(createdAtISO, todayISO, holidays);
-  if (businessDaysOpen < cfg.staleThresholdBusinessDays) {
-    deps.logger.info(
-      `stale-check skipped: too-young (PR #${prNumber}, business_days_open=${businessDaysOpen})`,
-    );
-    return;
-  }
 
-  // Filter step 7: reping cooldown.
-  const lastPinged = parseStalePingedAt(body);
-  if (lastPinged !== null) {
-    const sinceLastPing = businessDaysBetween(lastPinged, todayISO, holidays);
-    if (sinceLastPing < cfg.repingIntervalBusinessDays) {
-      deps.logger.info(
-        `stale-check skipped: reping-cooldown (PR #${prNumber}, business_days_since_last=${sinceLastPing})`,
-      );
-      return;
-    }
-  }
-
-  // Filter step 8 already handled at the run-level; per-PR is a no-op here.
-
-  // Filter step 9: max pings reached. Marker value is a STRING (D-02 / FND-06
+  // Filter step 6 (collapsed by Plan 03.1-05): schedule-driven eligibility.
+  // The old steps 6 (too-young vs single threshold) + 7 (reping cooldown) + 9
+  // (max-pings-per-pr cap) collapse into a single rule keyed off the schedule
+  // shape: fire ping K (1-indexed, K = currentPingCount + 1) when
+  //   businessDaysOpen >= schedule[K-1] AND currentPingCount === K-1
+  // Otherwise:
+  //   - currentPingCount >= schedule.length → max-pings-reached
+  //   - businessDaysOpen < schedule[currentPingCount] → too-young
+  //
+  // The marker value parseStalePingCount returns is a STRING (D-02 / FND-06
   // parity); integer-parse exactly once via Number.parseInt with explicit
-  // radix and NaN-fallback to 0.
+  // radix and NaN-fallback to 0. parseStalePingedAt is no longer consulted
+  // for eligibility (cooldown semantics are subsumed by the K-1 alignment
+  // between ping_count and schedule index), but the stale_pinged_at marker
+  // is still WRITTEN on each ping below for historical audit.
   const countStr = parseStalePingCount(body);
   const parsedCount = countStr === null ? 0 : Number.parseInt(countStr, 10);
   const safeCurrentCount = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 0;
-  if (safeCurrentCount >= cfg.maxPingsPerPr) {
+
+  const schedule = cfg.pingScheduleBusinessDays;
+  if (safeCurrentCount >= schedule.length) {
     deps.logger.info(
-      `stale-check skipped: max-pings-reached (PR #${prNumber}, count=${safeCurrentCount})`,
+      `stale-check skipped: max-pings-reached (PR #${prNumber}, count=${safeCurrentCount}, schedule_length=${schedule.length})`,
+    );
+    return;
+  }
+  // Safe by the length check above — schedule[safeCurrentCount] is in-bounds.
+  const nextScheduleEntry = schedule[safeCurrentCount] as number;
+  if (businessDaysOpen < nextScheduleEntry) {
+    deps.logger.info(
+      `stale-check skipped: too-young (PR #${prNumber}, business_days_open=${businessDaysOpen}, next_threshold=${nextScheduleEntry}, ping_count=${safeCurrentCount})`,
     );
     return;
   }
 
-  // Eligible — fire the ping (thread reply only; root-reaction-free per
-  // STAT-01 re-lock 2026-05-08).
+  // Eligible to fire ping K = safeCurrentCount + 1. Final-ping iff
+  // K === schedule.length (i.e. the new count exactly fills the schedule).
+  const nextCount = safeCurrentCount + 1;
+  const isFinal = nextCount === schedule.length;
+
+  // Filter step 8 already handled at the run-level; per-PR is a no-op here.
+
+  // Fire the ping (thread reply only; root-reaction-free per STAT-01 re-lock
+  // 2026-05-08 — see <critical_invariants> in PLAN.md).
   const warn = (msg: string): void => deps.logger.warning(msg);
   const authorLogin = pr.user?.login ?? '';
   const authorMention = resolveMention(authorLogin, deps.config.users, { warn });
@@ -1202,20 +1212,26 @@ async function processOnePrForStaleCheck(
     .filter((l): l is string => typeof l === 'string' && l.length > 0);
   const reviewerMentions = resolveAllMentions(reviewerLogins, deps.config.users, { warn });
 
-  const replyText = formatStalePingReply({ businessDaysOpen, authorMention, reviewerMentions });
+  // Branch on isFinal: select the final-ping escalation formatter when the
+  // ping about to fire is the last entry of the schedule. The intermediate
+  // formatter is preserved verbatim for K < schedule.length.
+  const replyText = isFinal
+    ? formatStaleFinalPingReply({ businessDaysOpen, authorMention, reviewerMentions })
+    : formatStalePingReply({ businessDaysOpen, authorMention, reviewerMentions });
   const reply = buildThreadReply({ text: replyText });
   const channel = deps.config.channel.channel;
 
   const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
   if (!postOk) return; // postThreadReply already tier-mapped the error.
 
-  // Increment count + write both new markers via the existing patchWithRetry.
-  const nextCount = safeCurrentCount + 1;
+  // Increment count + write both markers via the existing patchWithRetry.
+  // stale_pinged_at is still written on every ping for historical audit even
+  // though the eligibility check no longer reads it.
   const newBody = injectStalePingCount(injectStalePingedAt(body, todayISO), String(nextCount));
   await patchWithRetry(deps, owner, repo, prNumber, newBody);
 
   deps.logger.info(
-    `posted stale-ping for PR #${prNumber} (business_days_open=${businessDaysOpen}, ping_count=${nextCount})`,
+    `posted stale-ping for PR #${prNumber} (business_days_open=${businessDaysOpen}, ping_count=${nextCount}, final=${isFinal})`,
   );
 }
 
@@ -1271,17 +1287,20 @@ export async function main(): Promise<void> {
       staleCheck,
     };
 
-    // WR-04 — production safety guard. The D3 relaxation makes
-    // reping_interval_business_days=0 a valid schema value (the Phase 3.1
-    // keystone needs it). In production with a frequent cron, however, 0
-    // disables the per-PR cooldown — every run re-pings eligible PRs, capped
-    // only by max_pings_per_pr. That cap can be exhausted in a single
-    // afternoon. Surface a startup warning so operators see the risk in the
-    // Actions run; one-time log (not per-PR). This is intentional permissive
-    // mode — we DO NOT setFailed because the keystone path is legitimate.
-    if (staleCheck !== undefined && staleCheck.repingIntervalBusinessDays === 0) {
+    // WR-04 — production safety guard (Plan 03.1-05 consolidated form). The
+    // schedule shape allows pingScheduleBusinessDays[0]===0 (every cron run
+    // re-pings the same PR until ping count advances to schedule.length —
+    // useful for testing and high-velocity repos, risky in production).
+    // Surface a one-time startup warning so operators see the risk in the
+    // Actions run. Intentional permissive mode — DO NOT setFailed; the
+    // sandbox / keystone path with schedule [0] is legitimate.
+    if (
+      staleCheck !== undefined &&
+      staleCheck.pingScheduleBusinessDays.length > 0 &&
+      staleCheck.pingScheduleBusinessDays[0] === 0
+    ) {
       core.warning(
-        'config/stale-check.yml: reping_interval_business_days=0 disables the stale-check cooldown — every cron run will re-ping eligible PRs, capped only by max_pings_per_pr. Set to >=1 for production.',
+        'config/stale-check.yml: ping_schedule_business_days[0]=0 — first ping fires same-day eligible; every cron run will re-ping until ping count advances. Set to >=1 for production.',
       );
     }
 
