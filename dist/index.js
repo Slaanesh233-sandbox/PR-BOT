@@ -61027,233 +61027,6 @@ function classifyReviewComment(p) {
 
 // EXTERNAL MODULE: ./node_modules/yaml/dist/index.js
 var yaml_dist = __nccwpck_require__(8815);
-;// CONCATENATED MODULE: ./src/lib/types.ts
-// Pure data types — no runtime imports beyond standard lib. This module is the type root
-// of `src/lib/` and must not depend on any other `src/lib/` module.
-//
-// Phase 1 / Plan 03a — establishes the type surface consumed by:
-//   - marker.ts (this plan): ThreadTs
-//   - bot-filter.ts (this plan): WebhookActor
-//   - copy.ts (this plan): no type imports
-//   - mentions.ts, blocks.ts, event-router.ts, config-loader.ts (Plan 03b): everything else
-//
-// Decisions referenced:
-//   - D-02: ThreadTs is a string end-to-end; never parseFloat (FND-06).
-//   - D-05: Slack ID schema regexes are anchored on both ends.
-//   - D-07 SUPERSEDED 2026-05-06: PR title is NEVER rendered in any Slack message.
-//     PrSummary intentionally omits title/baseRef/headRef so blocks.ts is structurally
-//     prevented from echoing them (FLT-06(a)).
-// Slack identifiers — anchored regex validation per D-05.
-// T-01-09: anchors are load-bearing — verified by exact-substring grep in plan acceptance.
-const types_USERS_ID_REGEX = /^U[A-Z0-9]+$/;
-const types_CHANNEL_ID_REGEX = /^[CG][A-Z0-9]+$/;
-
-;// CONCATENATED MODULE: ./src/lib/config-loader.ts
-// Config loader — strict schema validators for the two on-disk YAML files
-// (`config/users.yml`, `config/channel.yml`). Both functions parse, validate
-// against anchored Slack ID regexes (D-05), and either return a typed object
-// or throw with a greppable message prefix.
-//
-// FND-02 / FND-03: schema validation runs as part of the unit-test suite and
-// hard-fails CI if any value violates. A typo'd Slack ID can never reach
-// production via this codepath.
-//
-// D-17: in the Phase 2 action handler, these throws are caught and routed to
-// `core.setFailed` so the GitHub Actions run shows a red X with the schema
-// error inline — the maintainer doesn't need to read the action logs to
-// discover that a config edit was malformed.
-//
-// T-01-22: `typeof value !== 'string'` is checked BEFORE the regex test, so
-// a YAML anchor or non-string value (e.g. nested map) throws clearly rather
-// than crashing the regex with a non-string argument.
-
-
-// Re-exported under shorter names purely for test ergonomics.
-const USERS_REGEX = (/* unused pure expression or super */ null && (USERS_ID_REGEX));
-const CHANNEL_REGEX = (/* unused pure expression or super */ null && (CHANNEL_ID_REGEX));
-/**
- * Parse + validate a `config/users.yml` text.
- *
- * Schema:
- *   - top-level mapping with exactly one required key, `users`
- *   - `users` is an object map: GitHubLogin -> SlackUserId
- *   - every value matches /^U[A-Z0-9]+$/ (anchored)
- *
- * Throws `Error` with prefix `users.yml schema:` on any violation.
- */
-function loadUsersMap(yamlText) {
-    const parsed = (0,yaml_dist/* parse */.qg)(yamlText);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error(`users.yml schema: top-level must be a mapping with a "users" key`);
-    }
-    const root = parsed;
-    if (!root.users || typeof root.users !== 'object' || Array.isArray(root.users)) {
-        throw new Error(`users.yml schema: missing or invalid "users" key`);
-    }
-    const usersIn = root.users;
-    const users = {};
-    for (const [login, value] of Object.entries(usersIn)) {
-        if (typeof value !== 'string') {
-            throw new Error(`users.yml schema: value for "${login}" must be a string, got ${typeof value}`);
-        }
-        if (!types_USERS_ID_REGEX.test(value)) {
-            throw new Error(`users.yml schema: value for "${login}" ("${value}") does not match Slack user ID regex /^U[A-Z0-9]+$/`);
-        }
-        users[login] = value;
-    }
-    return { users };
-}
-/**
- * Parse + validate a `config/channel.yml` text.
- *
- * Schema:
- *   - top-level mapping with one required key, `channel`
- *   - value is a string matching /^[CG][A-Z0-9]+$/ (anchored — public C* and private G*)
- *
- * Throws `Error` with prefix `channel.yml schema:` on any violation.
- */
-function loadChannelConfig(yamlText) {
-    const parsed = (0,yaml_dist/* parse */.qg)(yamlText);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error(`channel.yml schema: top-level must be a mapping with a "channel" key`);
-    }
-    const root = parsed;
-    if (typeof root.channel !== 'string') {
-        throw new Error(`channel.yml schema: missing or non-string "channel" key`);
-    }
-    if (!types_CHANNEL_ID_REGEX.test(root.channel)) {
-        throw new Error(`channel.yml schema: channel value ("${root.channel}") does not match Slack channel ID regex /^[CG][A-Z0-9]+$/`);
-    }
-    return { channel: root.channel };
-}
-// === Phase 3.1 — stale-check config loader (STALE-01) =======================
-//
-// Same pattern as loadUsersMap / loadChannelConfig: parseYaml → typeof checks
-// → schema checks → throw with greppable prefix on violation.
-//
-// Locked defaults from CONTEXT.md "Implementation defaults the planner should
-// ship as-is":
-//   - stale_threshold_business_days = 3
-//   - max_age_days = 30
-//   - reping_interval_business_days = 2
-//   - max_pings_per_pr = 3
-//
-// holidays defaults to [] when absent (the cron's Mon-Fri schedule restriction
-// + business-day filter cover the baseline; admins append company-specific
-// days as needed).
-const STALE_CHECK_DEFAULTS = {
-    holidays: [],
-    staleThresholdBusinessDays: 3,
-    maxAgeDays: 30,
-    repingIntervalBusinessDays: 2,
-    maxPingsPerPr: 3,
-};
-// Strict anchored ISO-8601 date regex. Shared with the marker validator for
-// stale_pinged_at (Plan 03.1-02 import).
-const STALE_CHECK_ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-function requirePositiveInteger(field, value) {
-    if (typeof value !== 'number') {
-        throw new Error(`stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`);
-    }
-    if (!Number.isInteger(value) || value < 1) {
-        throw new Error(`stale-check.yml schema: ${field} must be a positive integer, got ${value}`);
-    }
-    return value;
-}
-// Non-negative-integer variant. Semantically zero is a valid setting for
-// stale_threshold_business_days (treat every eligible PR as stale on day 0)
-// and reping_interval_business_days (no cooldown between pings). Both fields
-// are configured numerically — 0 is meaningful, not a sentinel for "absent".
-// The Phase 3.1 keystone (Plan 03.1-03 M5 → M10 Option-B override window)
-// relies on this — without it, the keystone cannot exercise S3 (eligible-fires)
-// on a same-day PR, since GitHub does not allow backdating created_at.
-function requireNonNegativeInteger(field, value) {
-    if (typeof value !== 'number') {
-        throw new Error(`stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`);
-    }
-    if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`stale-check.yml schema: ${field} must be a non-negative integer, got ${value}`);
-    }
-    return value;
-}
-/**
- * Parse + validate a `config/stale-check.yml` text. Phase 3.1 STALE-01.
- *
- * Schema:
- *   - top-level mapping (object); empty/null body allowed (returns all defaults)
- *   - `holidays`: array of ISO-8601 date strings matching /^\d{4}-\d{2}-\d{2}$/.
- *     Default: [] (no extra holidays beyond the cron's Mon-Fri restriction).
- *   - `stale_threshold_business_days`: non-negative integer (0 = every
- *     eligible PR is stale immediately, no minimum-age window); default 3.
- *     The D3 relaxation from positive-integer is required by the Phase 3.1
- *     keystone (Plan 03.1-03 M5 → M10 Option-B override window) so a
- *     same-day PR can exercise the eligible-fires path.
- *   - `max_age_days`: positive integer; default 30
- *   - `reping_interval_business_days`: non-negative integer (0 = no cooldown
- *     between pings on the same PR — every cron run will re-ping eligible
- *     PRs, capped only by `max_pings_per_pr`); default 2. PRODUCTION SAFETY:
- *     setting this to 0 in production is risky; WR-04 adds a runtime warning
- *     when the loaded value is 0.
- *   - `max_pings_per_pr`: positive integer; default 3
- *
- * Throws `Error` with prefix `stale-check.yml schema:` on any violation. The
- * dispatcher in Plan 03.1-02 catches these and routes through `core.setFailed`
- * (same D-17 pattern as loadUsersMap / loadChannelConfig).
- *
- * Defaults source: CONTEXT.md "Implementation defaults the planner should
- * ship as-is" section.
- */
-function loadStaleCheckConfig(yamlText) {
-    const parsed = (0,yaml_dist/* parse */.qg)(yamlText);
-    // Empty / null / undefined YAML → all defaults. Treat the file as an empty
-    // mapping so omitted-key paths below resolve uniformly.
-    if (parsed === null || parsed === undefined) {
-        return STALE_CHECK_DEFAULTS;
-    }
-    if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error(`stale-check.yml schema: top-level must be a mapping (got ${Array.isArray(parsed) ? 'array' : typeof parsed})`);
-    }
-    const root = parsed;
-    // holidays — array of ISO date strings; default [].
-    let holidays = STALE_CHECK_DEFAULTS.holidays;
-    if (root.holidays !== undefined && root.holidays !== null) {
-        if (!Array.isArray(root.holidays)) {
-            throw new Error(`stale-check.yml schema: holidays must be an array, got ${typeof root.holidays}`);
-        }
-        const out = [];
-        for (let i = 0; i < root.holidays.length; i += 1) {
-            const entry = root.holidays[i];
-            if (typeof entry !== 'string') {
-                throw new Error(`stale-check.yml schema: holidays[${i}] must be a string, got ${typeof entry}`);
-            }
-            if (!STALE_CHECK_ISO_DATE_REGEX.test(entry)) {
-                throw new Error(`stale-check.yml schema: holidays[${i}] ("${entry}") does not match ISO-8601 date regex /^\\d{4}-\\d{2}-\\d{2}$/`);
-            }
-            out.push(entry);
-        }
-        holidays = out;
-    }
-    const staleThresholdBusinessDays = root.stale_threshold_business_days === undefined
-        ? STALE_CHECK_DEFAULTS.staleThresholdBusinessDays
-        : requireNonNegativeInteger('stale_threshold_business_days', root.stale_threshold_business_days);
-    const maxAgeDays = root.max_age_days === undefined
-        ? STALE_CHECK_DEFAULTS.maxAgeDays
-        : requirePositiveInteger('max_age_days', root.max_age_days);
-    const repingIntervalBusinessDays = root.reping_interval_business_days === undefined
-        ? STALE_CHECK_DEFAULTS.repingIntervalBusinessDays
-        : requireNonNegativeInteger('reping_interval_business_days', root.reping_interval_business_days);
-    const maxPingsPerPr = root.max_pings_per_pr === undefined
-        ? STALE_CHECK_DEFAULTS.maxPingsPerPr
-        : requirePositiveInteger('max_pings_per_pr', root.max_pings_per_pr);
-    return {
-        holidays,
-        staleThresholdBusinessDays,
-        maxAgeDays,
-        repingIntervalBusinessDays,
-        maxPingsPerPr,
-    };
-}
-
 ;// CONCATENATED MODULE: ./src/lib/business-days.ts
 // Business-day arithmetic — pure date helper for the stale-PR reminder cron.
 //
@@ -61365,6 +61138,419 @@ function businessDaysBetween(start, end, holidays) {
         count += 1;
     }
     return count;
+}
+// === Phase 3.1 polish — auto-computed US-federal holidays (Plan 03.1-04) =====
+//
+// Eleven federal holidays per year, generated for [baseYear, baseYear+yearsAhead]
+// inclusive. The YAML `holidays:` array in `config/stale-check.yml` becomes
+// ADDITIVE — admins list company-specific dates only (year-end shutdown weeks,
+// founders' day, regional office closures). Auto-computed list self-extends
+// every cron tick; no manual annual refresh required.
+//
+// Calendar rules:
+//   - Fixed-date holidays (New Year's Day, Juneteenth, Independence Day,
+//     Veterans Day, Christmas): the literal calendar date.
+//   - Floating-weekday holidays (MLK, Presidents, Memorial, Labor, Columbus,
+//     Thanksgiving): the nth occurrence (or LAST occurrence for Memorial) of
+//     the named weekday in the named month.
+//
+// Federal observed-shift rule for FIXED-date holidays only:
+//   - If the fixed date falls on Saturday → observed on the preceding Friday.
+//   - If the fixed date falls on Sunday   → observed on the following Monday.
+//   - Weekday-fall                        → no shift.
+//
+// Floating-weekday holidays NEVER need shifting (always a Mon/Thu by
+// construction). The shift may cross a year boundary — e.g. Jan 1 2022 falls
+// on Saturday and is therefore observed on Friday Dec 31 2021. The observed
+// date is what employees actually take off, so the helper emits it even when
+// it lands outside the [baseYear, baseYear+yearsAhead] window.
+//
+// All math is UTC-pure: Date.UTC + getUTCDay(). No locale-dependent
+// toLocaleDateString. Mirrors the existing module pattern from Phase 3.1-01.
+const WEEKDAY_SUN = 0;
+const WEEKDAY_MON = 1;
+const WEEKDAY_THU = 4;
+const WEEKDAY_SAT = 6;
+/**
+ * Build the ISO date of the nth occurrence of `targetDow` in `year`/`month`
+ * (1-indexed `month`). For example `nthWeekdayOfMonth(2026, 1, 1, 3)` is the
+ * 3rd Monday of January 2026.
+ */
+function nthWeekdayOfMonth(year, month, targetDow, n) {
+    const firstMs = Date.UTC(year, month - 1, 1);
+    const firstDow = new Date(firstMs).getUTCDay();
+    // Day-of-month of the first occurrence of targetDow this month.
+    const firstOccurrence = 1 + ((targetDow - firstDow + 7) % 7);
+    const dayOfMonth = firstOccurrence + (n - 1) * 7;
+    return utcMsToIsoDate(Date.UTC(year, month - 1, dayOfMonth));
+}
+/**
+ * Build the ISO date of the LAST occurrence of `targetDow` in `year`/`month`.
+ * Used for Memorial Day (last Monday of May).
+ */
+function lastWeekdayOfMonth(year, month, targetDow) {
+    // `month` is 1-indexed (Jan=1). Date.UTC(year, monthArg, 0) returns the
+    // millisecond timestamp of "day 0 of monthArg-zero-indexed" — i.e. the last
+    // day of the PREVIOUS zero-indexed month, which is exactly the last day of
+    // the 1-indexed `month` parameter. So passing `month` directly as the
+    // Date.UTC monthArg (since month-1+1 = month) gives the last day of the
+    // 1-indexed month. Verified by unit test (Memorial Day last Mon May 2026
+    // = May 25; 5/31/2026 is a Sunday → back 6 days = May 25).
+    const lastMs = Date.UTC(year, month, 0);
+    const lastDow = new Date(lastMs).getUTCDay();
+    const lastDate = new Date(lastMs).getUTCDate();
+    // Distance back to the most recent targetDow on/before the last day.
+    const back = (lastDow - targetDow + 7) % 7;
+    const dayOfMonth = lastDate - back;
+    return utcMsToIsoDate(Date.UTC(year, month - 1, dayOfMonth));
+}
+/**
+ * Apply the federal observed-shift rule to a fixed-date holiday.
+ * Saturday → preceding Friday. Sunday → following Monday. Weekday → no shift.
+ * Returns the observed ISO date (may differ in month/year from the input).
+ */
+function applyObservedShift(isoDate) {
+    const ms = parseIsoDateToUtcMs(isoDate);
+    const dow = new Date(ms).getUTCDay();
+    if (dow === WEEKDAY_SAT) {
+        return utcMsToIsoDate(ms - ONE_DAY_MS);
+    }
+    if (dow === WEEKDAY_SUN) {
+        return utcMsToIsoDate(ms + ONE_DAY_MS);
+    }
+    return isoDate;
+}
+/**
+ * Return the current UTC year. Wrapped in a function (not a top-level const)
+ * so test fixtures and time-traveling callers may pin `baseYear` explicitly
+ * without baking the wall-clock year into module load.
+ */
+function currentUtcYear() {
+    return new Date().getUTCFullYear();
+}
+/**
+ * Compute the US-federal-holiday set for years [baseYear, baseYear+yearsAhead]
+ * inclusive. Returns ISO-8601 date strings sorted ascending, deduplicated.
+ *
+ * Eleven holidays per year:
+ *   - New Year's Day (Jan 1, observed-shifted)
+ *   - MLK Day (3rd Monday of January)
+ *   - Presidents Day (3rd Monday of February)
+ *   - Memorial Day (last Monday of May)
+ *   - Juneteenth (Jun 19, observed-shifted)
+ *   - Independence Day (Jul 4, observed-shifted)
+ *   - Labor Day (1st Monday of September)
+ *   - Columbus / Indigenous Peoples' Day (2nd Monday of October)
+ *   - Veterans Day (Nov 11, observed-shifted)
+ *   - Thanksgiving (4th Thursday of November)
+ *   - Christmas (Dec 25, observed-shifted)
+ *
+ * Defaults: `baseYear = currentUtcYear()`, `yearsAhead = 5`.
+ *
+ * Edge case: observed-shift may push a Jan-1 holiday into the previous
+ * calendar year (Jan 1 Sat → preceding Fri Dec 31 of prior year). The
+ * observed date is what employees actually take off, so this helper emits
+ * it even though it falls outside the nominal [baseYear, baseYear+yearsAhead]
+ * window. Symmetrically, a Dec-25 / Dec-31 holiday could in principle shift
+ * into the following year (Dec 25 Sat → preceding Fri Dec 24 stays in year;
+ * but a Jan-1-of-next-year computed at the end of the window may show up
+ * via the previous-year's New-Year's-Day generation — dedup handles this).
+ */
+function computeUsFederalHolidays(opts) {
+    const yearsAhead = opts?.yearsAhead ?? 5;
+    const baseYear = opts?.baseYear ?? currentUtcYear();
+    const out = new Set();
+    for (let y = baseYear; y <= baseYear + yearsAhead; y += 1) {
+        // Fixed-date holidays — apply observed-shift rule.
+        out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-01-01`)); // New Year's Day
+        out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-06-19`)); // Juneteenth
+        out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-07-04`)); // Independence Day
+        out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-11-11`)); // Veterans Day
+        out.add(applyObservedShift(`${y.toString().padStart(4, '0')}-12-25`)); // Christmas
+        // Floating-weekday holidays — no shift (always a weekday by construction).
+        out.add(nthWeekdayOfMonth(y, 1, WEEKDAY_MON, 3)); // MLK Day — 3rd Mon Jan
+        out.add(nthWeekdayOfMonth(y, 2, WEEKDAY_MON, 3)); // Presidents Day — 3rd Mon Feb
+        out.add(lastWeekdayOfMonth(y, 5, WEEKDAY_MON)); // Memorial Day — last Mon May
+        out.add(nthWeekdayOfMonth(y, 9, WEEKDAY_MON, 1)); // Labor Day — 1st Mon Sep
+        out.add(nthWeekdayOfMonth(y, 10, WEEKDAY_MON, 2)); // Columbus / Indigenous Peoples' Day — 2nd Mon Oct
+        out.add(nthWeekdayOfMonth(y, 11, WEEKDAY_THU, 4)); // Thanksgiving — 4th Thu Nov
+    }
+    return Object.freeze([...out].sort());
+}
+/**
+ * Returns true iff `isoDate` is in the auto-computed US-federal-holiday set
+ * for the given window (default: current UTC year + 5).
+ *
+ * Throws RangeError on malformed input (same contract as isBusinessDay).
+ */
+function isUsFederalHoliday(isoDate, opts) {
+    // Validate input shape eagerly — share the existing parser's error path.
+    parseIsoDateToUtcMs(isoDate);
+    const holidays = computeUsFederalHolidays(opts);
+    return holidays.includes(isoDate);
+}
+
+;// CONCATENATED MODULE: ./src/lib/types.ts
+// Pure data types — no runtime imports beyond standard lib. This module is the type root
+// of `src/lib/` and must not depend on any other `src/lib/` module.
+//
+// Phase 1 / Plan 03a — establishes the type surface consumed by:
+//   - marker.ts (this plan): ThreadTs
+//   - bot-filter.ts (this plan): WebhookActor
+//   - copy.ts (this plan): no type imports
+//   - mentions.ts, blocks.ts, event-router.ts, config-loader.ts (Plan 03b): everything else
+//
+// Decisions referenced:
+//   - D-02: ThreadTs is a string end-to-end; never parseFloat (FND-06).
+//   - D-05: Slack ID schema regexes are anchored on both ends.
+//   - D-07 SUPERSEDED 2026-05-06: PR title is NEVER rendered in any Slack message.
+//     PrSummary intentionally omits title/baseRef/headRef so blocks.ts is structurally
+//     prevented from echoing them (FLT-06(a)).
+// Slack identifiers — anchored regex validation per D-05.
+// T-01-09: anchors are load-bearing — verified by exact-substring grep in plan acceptance.
+const types_USERS_ID_REGEX = /^U[A-Z0-9]+$/;
+const types_CHANNEL_ID_REGEX = /^[CG][A-Z0-9]+$/;
+
+;// CONCATENATED MODULE: ./src/lib/config-loader.ts
+// Config loader — strict schema validators for the two on-disk YAML files
+// (`config/users.yml`, `config/channel.yml`). Both functions parse, validate
+// against anchored Slack ID regexes (D-05), and either return a typed object
+// or throw with a greppable message prefix.
+//
+// FND-02 / FND-03: schema validation runs as part of the unit-test suite and
+// hard-fails CI if any value violates. A typo'd Slack ID can never reach
+// production via this codepath.
+//
+// D-17: in the Phase 2 action handler, these throws are caught and routed to
+// `core.setFailed` so the GitHub Actions run shows a red X with the schema
+// error inline — the maintainer doesn't need to read the action logs to
+// discover that a config edit was malformed.
+//
+// T-01-22: `typeof value !== 'string'` is checked BEFORE the regex test, so
+// a YAML anchor or non-string value (e.g. nested map) throws clearly rather
+// than crashing the regex with a non-string argument.
+
+
+
+// Re-exported under shorter names purely for test ergonomics.
+const USERS_REGEX = (/* unused pure expression or super */ null && (USERS_ID_REGEX));
+const CHANNEL_REGEX = (/* unused pure expression or super */ null && (CHANNEL_ID_REGEX));
+/**
+ * Parse + validate a `config/users.yml` text.
+ *
+ * Schema:
+ *   - top-level mapping with exactly one required key, `users`
+ *   - `users` is an object map: GitHubLogin -> SlackUserId
+ *   - every value matches /^U[A-Z0-9]+$/ (anchored)
+ *
+ * Throws `Error` with prefix `users.yml schema:` on any violation.
+ */
+function loadUsersMap(yamlText) {
+    const parsed = (0,yaml_dist/* parse */.qg)(yamlText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`users.yml schema: top-level must be a mapping with a "users" key`);
+    }
+    const root = parsed;
+    if (!root.users || typeof root.users !== 'object' || Array.isArray(root.users)) {
+        throw new Error(`users.yml schema: missing or invalid "users" key`);
+    }
+    const usersIn = root.users;
+    const users = {};
+    for (const [login, value] of Object.entries(usersIn)) {
+        if (typeof value !== 'string') {
+            throw new Error(`users.yml schema: value for "${login}" must be a string, got ${typeof value}`);
+        }
+        if (!types_USERS_ID_REGEX.test(value)) {
+            throw new Error(`users.yml schema: value for "${login}" ("${value}") does not match Slack user ID regex /^U[A-Z0-9]+$/`);
+        }
+        users[login] = value;
+    }
+    return { users };
+}
+/**
+ * Parse + validate a `config/channel.yml` text.
+ *
+ * Schema:
+ *   - top-level mapping with one required key, `channel`
+ *   - value is a string matching /^[CG][A-Z0-9]+$/ (anchored — public C* and private G*)
+ *
+ * Throws `Error` with prefix `channel.yml schema:` on any violation.
+ */
+function loadChannelConfig(yamlText) {
+    const parsed = (0,yaml_dist/* parse */.qg)(yamlText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`channel.yml schema: top-level must be a mapping with a "channel" key`);
+    }
+    const root = parsed;
+    if (typeof root.channel !== 'string') {
+        throw new Error(`channel.yml schema: missing or non-string "channel" key`);
+    }
+    if (!types_CHANNEL_ID_REGEX.test(root.channel)) {
+        throw new Error(`channel.yml schema: channel value ("${root.channel}") does not match Slack channel ID regex /^[CG][A-Z0-9]+$/`);
+    }
+    return { channel: root.channel };
+}
+// === Phase 3.1 — stale-check config loader (STALE-01) =======================
+//
+// Same pattern as loadUsersMap / loadChannelConfig: parseYaml → typeof checks
+// → schema checks → throw with greppable prefix on violation.
+//
+// Locked defaults from CONTEXT.md "Implementation defaults the planner should
+// ship as-is":
+//   - stale_threshold_business_days = 3
+//   - max_age_days = 30
+//   - reping_interval_business_days = 2
+//   - max_pings_per_pr = 3
+//
+// Holidays (Plan 03.1-04 — auto-computed US-federal merge):
+//   - US-federal holidays for the next 5 years (inclusive of the current UTC
+//     year) are auto-computed by `computeUsFederalHolidays` in
+//     business-days.ts and ALWAYS merged into the returned `holidays` array.
+//   - YAML `holidays:` is purely ADDITIVE — admins list company-specific
+//     dates (year-end shutdowns, founders' day) and those are merged on top.
+//   - Duplicates between YAML extras and auto-computed federal dates are
+//     silently deduped; result is sorted ascending in ISO-8601 order.
+//   - Self-extending across the bot's lifetime; no manual annual refresh.
+// Plan 03.1-04: holidays is no longer materialized as a default constant —
+// it's computed at load time so the current UTC year drives the auto-computed
+// US-federal window. The non-holiday defaults remain locked from CONTEXT.md.
+const STALE_CHECK_NON_HOLIDAY_DEFAULTS = {
+    staleThresholdBusinessDays: 3,
+    maxAgeDays: 30,
+    repingIntervalBusinessDays: 2,
+    maxPingsPerPr: 3,
+};
+// Number of years (inclusive of baseYear) for which US-federal holidays are
+// auto-computed and merged into the on-disk YAML's `holidays:` array.
+// 5 years ahead means the loader generates [now, now+5] = 6 calendar years of
+// federal holidays at each invocation. Self-extending; no manual annual
+// refresh required.
+const STALE_CHECK_HOLIDAY_YEARS_AHEAD = 5;
+// Strict anchored ISO-8601 date regex. Shared with the marker validator for
+// stale_pinged_at (Plan 03.1-02 import).
+const STALE_CHECK_ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+function requirePositiveInteger(field, value) {
+    if (typeof value !== 'number') {
+        throw new Error(`stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`);
+    }
+    if (!Number.isInteger(value) || value < 1) {
+        throw new Error(`stale-check.yml schema: ${field} must be a positive integer, got ${value}`);
+    }
+    return value;
+}
+// Non-negative-integer variant. Semantically zero is a valid setting for
+// stale_threshold_business_days (treat every eligible PR as stale on day 0)
+// and reping_interval_business_days (no cooldown between pings). Both fields
+// are configured numerically — 0 is meaningful, not a sentinel for "absent".
+// The Phase 3.1 keystone (Plan 03.1-03 M5 → M10 Option-B override window)
+// relies on this — without it, the keystone cannot exercise S3 (eligible-fires)
+// on a same-day PR, since GitHub does not allow backdating created_at.
+function requireNonNegativeInteger(field, value) {
+    if (typeof value !== 'number') {
+        throw new Error(`stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`);
+    }
+    if (!Number.isInteger(value) || value < 0) {
+        throw new Error(`stale-check.yml schema: ${field} must be a non-negative integer, got ${value}`);
+    }
+    return value;
+}
+/**
+ * Parse + validate a `config/stale-check.yml` text. Phase 3.1 STALE-01.
+ *
+ * Schema:
+ *   - top-level mapping (object); empty/null body allowed (returns all defaults)
+ *   - `holidays`: array of ISO-8601 date strings matching /^\d{4}-\d{2}-\d{2}$/.
+ *     **ADDITIVE (Plan 03.1-04):** the YAML list is merged with the
+ *     auto-computed US-federal-holiday set (5 years ahead, self-extending,
+ *     produced by `computeUsFederalHolidays` in business-days.ts). Admins
+ *     list company-specific dates only (year-end shutdown weeks, founders'
+ *     day, regional office closures); duplicates with auto-computed federal
+ *     dates are silently deduped. Default: [] additive entries (the
+ *     auto-computed federal set is always present).
+ *   - `stale_threshold_business_days`: non-negative integer (0 = every
+ *     eligible PR is stale immediately, no minimum-age window); default 3.
+ *     The D3 relaxation from positive-integer is required by the Phase 3.1
+ *     keystone (Plan 03.1-03 M5 → M10 Option-B override window) so a
+ *     same-day PR can exercise the eligible-fires path.
+ *   - `max_age_days`: positive integer; default 30
+ *   - `reping_interval_business_days`: non-negative integer (0 = no cooldown
+ *     between pings on the same PR — every cron run will re-ping eligible
+ *     PRs, capped only by `max_pings_per_pr`); default 2. PRODUCTION SAFETY:
+ *     setting this to 0 in production is risky; WR-04 adds a runtime warning
+ *     when the loaded value is 0.
+ *   - `max_pings_per_pr`: positive integer; default 3
+ *
+ * Throws `Error` with prefix `stale-check.yml schema:` on any violation. The
+ * dispatcher in Plan 03.1-02 catches these and routes through `core.setFailed`
+ * (same D-17 pattern as loadUsersMap / loadChannelConfig).
+ *
+ * Defaults source: CONTEXT.md "Implementation defaults the planner should
+ * ship as-is" section. Holiday-merge semantics: Plan 03.1-04 — purely
+ * additive YAML, US-federal auto-computed.
+ */
+function loadStaleCheckConfig(yamlText) {
+    const parsed = (0,yaml_dist/* parse */.qg)(yamlText);
+    // Auto-computed US-federal holiday set. Generated for the next
+    // STALE_CHECK_HOLIDAY_YEARS_AHEAD years (inclusive of the current UTC year);
+    // self-extending across the bot's lifetime so admins never need to refresh
+    // this list manually.
+    const autoFederal = computeUsFederalHolidays({
+        yearsAhead: STALE_CHECK_HOLIDAY_YEARS_AHEAD,
+    });
+    // Empty / null / undefined YAML body → no YAML extras; auto-federal alone.
+    if (parsed === null || parsed === undefined) {
+        return {
+            holidays: Object.freeze([...autoFederal]),
+            ...STALE_CHECK_NON_HOLIDAY_DEFAULTS,
+        };
+    }
+    if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`stale-check.yml schema: top-level must be a mapping (got ${Array.isArray(parsed) ? 'array' : typeof parsed})`);
+    }
+    const root = parsed;
+    // YAML holidays — additive extras. Validate strictly (same anchored ISO
+    // regex as before) BEFORE merging with the auto-computed federal set, so
+    // a malformed YAML entry still HARD-FAILS regardless of what auto produces.
+    const yamlExtras = [];
+    if (root.holidays !== undefined && root.holidays !== null) {
+        if (!Array.isArray(root.holidays)) {
+            throw new Error(`stale-check.yml schema: holidays must be an array, got ${typeof root.holidays}`);
+        }
+        for (let i = 0; i < root.holidays.length; i += 1) {
+            const entry = root.holidays[i];
+            if (typeof entry !== 'string') {
+                throw new Error(`stale-check.yml schema: holidays[${i}] must be a string, got ${typeof entry}`);
+            }
+            if (!STALE_CHECK_ISO_DATE_REGEX.test(entry)) {
+                throw new Error(`stale-check.yml schema: holidays[${i}] ("${entry}") does not match ISO-8601 date regex /^\\d{4}-\\d{2}-\\d{2}$/`);
+            }
+            yamlExtras.push(entry);
+        }
+    }
+    // Merge auto-federal + YAML extras: dedupe via Set, then sort ascending.
+    // Order in the result is canonical ISO ascending — independent of input
+    // ordering, so the consumer (businessDaysBetween) doesn't depend on YAML
+    // declaration order.
+    const merged = Object.freeze([...new Set([...autoFederal, ...yamlExtras])].sort());
+    const staleThresholdBusinessDays = root.stale_threshold_business_days === undefined
+        ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.staleThresholdBusinessDays
+        : requireNonNegativeInteger('stale_threshold_business_days', root.stale_threshold_business_days);
+    const maxAgeDays = root.max_age_days === undefined
+        ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.maxAgeDays
+        : requirePositiveInteger('max_age_days', root.max_age_days);
+    const repingIntervalBusinessDays = root.reping_interval_business_days === undefined
+        ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.repingIntervalBusinessDays
+        : requireNonNegativeInteger('reping_interval_business_days', root.reping_interval_business_days);
+    const maxPingsPerPr = root.max_pings_per_pr === undefined
+        ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.maxPingsPerPr
+        : requirePositiveInteger('max_pings_per_pr', root.max_pings_per_pr);
+    return {
+        holidays: merged,
+        staleThresholdBusinessDays,
+        maxAgeDays,
+        repingIntervalBusinessDays,
+        maxPingsPerPr,
+    };
 }
 
 ;// CONCATENATED MODULE: ./src/lib/index.ts
