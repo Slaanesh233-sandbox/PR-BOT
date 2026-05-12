@@ -60692,6 +60692,69 @@ function formatStalePingReply(args) {
     const ccTexts = [args.authorMention.text, ...args.reviewerMentions.map((m) => m.text)].join(' ');
     return `📬 this PR has been open for ${args.businessDaysOpen} business days.\n  cc ${ccTexts}`;
 }
+/**
+ * STALE-01 final-ping thread reply (Plan 03.1-05 — added 2026-05-12 per user
+ * verbatim direction in session 4):
+ *
+ *   "First ping should be happening after PR is opened for 1 week. Second on
+ *    3rd week. And final msg saying something like PR is already 1 month old,
+ *    final ping, and will no longer be tracked. Please author to escalate, etc."
+ *
+ * Fires once per PR on the LAST entry of `ping_schedule_business_days`. The
+ * dispatcher in src/index.ts detects this via
+ *   isFinal = (currentPingCount + 1) === schedule.length
+ * and selects this formatter instead of formatStalePingReply.
+ *
+ * Output template (renders the FOUR required surfaces locked by
+ * tests/copy.test.ts):
+ *
+ *   line 1: 📬 this PR has been open for {N} business days (~1 month). this is
+ *           the final automated ping — it will no longer be tracked from here.
+ *   line 2: (two-space indent) {author-mention} please escalate or close.
+ *   line 3 (only when reviewerMentions.length > 0): (two-space indent)
+ *           cc {reviewer1-mention} {reviewer2-mention} ...
+ *
+ * Required surfaces (asserted by tests):
+ *   - 📬 emoji prefix (U+1F4EC) — visual continuity with the intermediate
+ *     ping so recipients recognize the stale-ping channel at a glance.
+ *   - case-insensitive substring 'final' — terminal signal.
+ *   - case-insensitive substring 'no longer be tracked' — retirement signal
+ *     so the recipient understands the bot retires from this PR.
+ *   - case-insensitive substring 'escalate' — captures the user-verbatim
+ *     direction ("please author to escalate").
+ *   - the author-mention .text rendered on its own line, separate from any
+ *     cc clause so it reads as a direct address rather than a CC list item.
+ *
+ * Zero-reviewer edge case: line 3 (the `cc` clause) is OMITTED entirely;
+ * the author-direct address on line 2 carries the escalation ask alone.
+ *
+ * FLT-05 invariant: the formatter takes ALREADY-RESOLVED ResolvedMention
+ * objects and uses ONLY their .text property — it never constructs the
+ * Slack user-mention angle-bracket-at-U syntax. That monopoly lives in
+ * `mentions.ts` (Plan 01-03b). Both 'mapped' and 'fallback' kinds flow
+ * through unchanged; mapped produces a real Slack ping, fallback renders
+ * a plain @login literal that does not ping.
+ *
+ * STAT-01 re-lock 2026-05-08 invariant: this is a THREAD REPLY only — the
+ * function emits text only; the dispatcher MUST NOT add or remove a root
+ * reaction on the final ping (same as the intermediate ping).
+ *
+ * Throws RangeError for businessDaysOpen < 0 or non-integer (parity with
+ * formatStalePingReply's D2 live-fix floor relaxation).
+ */
+function formatStaleFinalPingReply(args) {
+    if (!Number.isInteger(args.businessDaysOpen) || args.businessDaysOpen < 0) {
+        throw new RangeError(`formatStaleFinalPingReply: businessDaysOpen must be a non-negative integer, got ${args.businessDaysOpen}`);
+    }
+    const header = `📬 this PR has been open for ${args.businessDaysOpen} business days (~1 month). this is the final automated ping — it will no longer be tracked from here.`;
+    const escalationLine = `  ${args.authorMention.text} please escalate or close.`;
+    if (args.reviewerMentions.length === 0) {
+        return `${header}\n${escalationLine}`;
+    }
+    const reviewerTexts = args.reviewerMentions.map((m) => m.text).join(' ');
+    const ccLine = `  cc ${reviewerTexts}`;
+    return `${header}\n${escalationLine}\n${ccLine}`;
+}
 
 ;// CONCATENATED MODULE: ./src/lib/blocks.ts
 // Blocks module — Block Kit builders for the OPEN-04 root message and thread replies.
@@ -61395,12 +61458,20 @@ function loadChannelConfig(yamlText) {
 // Same pattern as loadUsersMap / loadChannelConfig: parseYaml → typeof checks
 // → schema checks → throw with greppable prefix on violation.
 //
-// Locked defaults from CONTEXT.md "Implementation defaults the planner should
-// ship as-is":
-//   - stale_threshold_business_days = 3
-//   - max_age_days = 30
-//   - reping_interval_business_days = 2
-//   - max_pings_per_pr = 3
+// Plan 03.1-05 schema migration (2026-05-12) — the v1.0 three-field shape
+// (stale_threshold_business_days / reping_interval_business_days /
+// max_pings_per_pr) is REPLACED by a single explicit per-ping schedule:
+//   - ping_schedule_business_days: array of non-negative integers, length 1..10,
+//     strictly monotonically increasing. Default when absent: [5, 15, 20]
+//     (week 1 + week 3 + ~month 1). The LAST entry triggers the final-ping
+//     escalation copy (formatStaleFinalPingReply).
+//
+// Eligibility now collapses to a single rule: fire ping K (1-indexed) when
+//   businessDaysOpen >= schedule[K-1] AND currentPingCount === K-1
+// — no separate cooldown or max-pings check is needed.
+//
+// max_age_days remains (positive integer; default 30; calendar-day cap for
+// PRs that should be human-triaged rather than bot-pinged).
 //
 // Holidays (Plan 03.1-04 — auto-computed US-federal merge):
 //   - US-federal holidays for the next 5 years (inclusive of the current UTC
@@ -61413,13 +61484,18 @@ function loadChannelConfig(yamlText) {
 //   - Self-extending across the bot's lifetime; no manual annual refresh.
 // Plan 03.1-04: holidays is no longer materialized as a default constant —
 // it's computed at load time so the current UTC year drives the auto-computed
-// US-federal window. The non-holiday defaults remain locked from CONTEXT.md.
-const STALE_CHECK_NON_HOLIDAY_DEFAULTS = {
-    staleThresholdBusinessDays: 3,
-    maxAgeDays: 30,
-    repingIntervalBusinessDays: 2,
-    maxPingsPerPr: 3,
-};
+// US-federal window. Plan 03.1-05: max_age_days remains the only locked
+// non-schedule, non-holiday default; the three obsolete fields are gone.
+const STALE_CHECK_MAX_AGE_DAYS_DEFAULT = 30;
+// Plan 03.1-05: default per-ping schedule when ping_schedule_business_days is
+// absent from YAML. Cadence reads: week 1 + week 3 + ~month 1 (business days).
+// The last entry (20) triggers the final-ping escalation copy.
+const STALE_CHECK_DEFAULT_PING_SCHEDULE = Object.freeze([5, 15, 20]);
+// Plan 03.1-05: ping schedule array length floor (must fire at least once) and
+// ceiling (operator sanity: more than ten pings on a single PR is annoyance,
+// not signal). The strictly-monotonic check upstream additionally guarantees
+// no duplicates and no decreasing entries.
+const STALE_CHECK_PING_SCHEDULE_MAX_LENGTH = 10;
 // Number of years (inclusive of baseYear) for which US-federal holidays are
 // auto-computed and merged into the on-disk YAML's `holidays:` array.
 // 5 years ahead means the loader generates [now, now+5] = 6 calendar years of
@@ -61438,26 +61514,47 @@ function requirePositiveInteger(field, value) {
     }
     return value;
 }
-// Non-negative-integer variant. Semantically zero is a valid setting for
-// stale_threshold_business_days (treat every eligible PR as stale on day 0)
-// and reping_interval_business_days (no cooldown between pings). Both fields
-// are configured numerically — 0 is meaningful, not a sentinel for "absent".
-// The Phase 3.1 keystone (Plan 03.1-03 M5 → M10 Option-B override window)
-// relies on this — without it, the keystone cannot exercise S3 (eligible-fires)
-// on a same-day PR, since GitHub does not allow backdating created_at.
-function requireNonNegativeInteger(field, value) {
-    if (typeof value !== 'number') {
-        throw new Error(`stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`);
+// Plan 03.1-05: validate `ping_schedule_business_days`. The value (when
+// present) must be a JS array (Array.isArray), length within [1, 10], every
+// entry a non-negative integer (typeof === 'number' && Number.isInteger), and
+// strictly monotonically increasing (each entry > previous, so duplicates and
+// decreases are rejected). Same `stale-check.yml schema:` throw prefix as the
+// surrounding loader for D-17 parity. Returns a frozen copy of the validated
+// array; falls back to `fallback` when value is undefined.
+//
+// D-02 / FND-06 invariant: every numeric check uses Number.isInteger on a
+// typeof-checked native-number value — string-to-number coercion of any kind
+// is forbidden by the repo-wide grep gate. YAML's parser produces native JS
+// numbers for integer literals; a quoted entry like "20" comes back as a
+// string and fails the typeof check with the index-anchored error message.
+function parseAndValidatePingSchedule(value, fallback) {
+    if (value === undefined) {
+        return Object.freeze([...fallback]);
     }
-    if (!Number.isInteger(value) || value < 0) {
-        throw new Error(`stale-check.yml schema: ${field} must be a non-negative integer, got ${value}`);
+    if (!Array.isArray(value)) {
+        throw new Error(`stale-check.yml schema: ping_schedule_business_days must be an array, got ${typeof value}`);
     }
-    return value;
+    if (value.length === 0) {
+        throw new Error(`stale-check.yml schema: ping_schedule_business_days must have length >= 1, got empty array`);
+    }
+    if (value.length > STALE_CHECK_PING_SCHEDULE_MAX_LENGTH) {
+        throw new Error(`stale-check.yml schema: ping_schedule_business_days must have length <= ${STALE_CHECK_PING_SCHEDULE_MAX_LENGTH}, got ${value.length}`);
+    }
+    for (let i = 0; i < value.length; i += 1) {
+        const entry = value[i];
+        if (typeof entry !== 'number' || !Number.isInteger(entry) || entry < 0) {
+            throw new Error(`stale-check.yml schema: ping_schedule_business_days[${i}] must be a non-negative integer, got ${String(entry)} (typeof ${typeof entry})`);
+        }
+        if (i > 0 && entry <= value[i - 1]) {
+            throw new Error(`stale-check.yml schema: ping_schedule_business_days must be strictly monotonically increasing; entry[${i}]=${entry} is not greater than entry[${i - 1}]=${String(value[i - 1])}`);
+        }
+    }
+    return Object.freeze([...value]);
 }
 /**
  * Parse + validate a `config/stale-check.yml` text. Phase 3.1 STALE-01.
  *
- * Schema:
+ * Schema (v1.1 — Plan 03.1-05 migration, 2026-05-12):
  *   - top-level mapping (object); empty/null body allowed (returns all defaults)
  *   - `holidays`: array of ISO-8601 date strings matching /^\d{4}-\d{2}-\d{2}$/.
  *     **ADDITIVE (Plan 03.1-04):** the YAML list is merged with the
@@ -61467,26 +61564,24 @@ function requireNonNegativeInteger(field, value) {
  *     day, regional office closures); duplicates with auto-computed federal
  *     dates are silently deduped. Default: [] additive entries (the
  *     auto-computed federal set is always present).
- *   - `stale_threshold_business_days`: non-negative integer (0 = every
- *     eligible PR is stale immediately, no minimum-age window); default 3.
- *     The D3 relaxation from positive-integer is required by the Phase 3.1
- *     keystone (Plan 03.1-03 M5 → M10 Option-B override window) so a
- *     same-day PR can exercise the eligible-fires path.
- *   - `max_age_days`: positive integer; default 30
- *   - `reping_interval_business_days`: non-negative integer (0 = no cooldown
- *     between pings on the same PR — every cron run will re-ping eligible
- *     PRs, capped only by `max_pings_per_pr`); default 2. PRODUCTION SAFETY:
- *     setting this to 0 in production is risky; WR-04 adds a runtime warning
- *     when the loaded value is 0.
- *   - `max_pings_per_pr`: positive integer; default 3
+ *   - `max_age_days`: positive integer; default 30. Calendar-day cap above
+ *     which a PR is exempt from stale-pings (it's human-triage territory).
+ *   - `ping_schedule_business_days`: array of non-negative integers, length
+ *     1..10, strictly monotonically increasing. Default when absent:
+ *     [5, 15, 20] (week 1 + week 3 + ~month 1). The LAST entry triggers the
+ *     final-ping escalation copy (formatStaleFinalPingReply). Eligibility:
+ *     fire ping K when businessDaysOpen >= schedule[K-1] AND
+ *     currentPingCount === K-1.
  *
  * Throws `Error` with prefix `stale-check.yml schema:` on any violation. The
- * dispatcher in Plan 03.1-02 catches these and routes through `core.setFailed`
- * (same D-17 pattern as loadUsersMap / loadChannelConfig).
+ * dispatcher in src/index.ts catches these and routes through
+ * `core.setFailed` (same D-17 pattern as loadUsersMap / loadChannelConfig).
  *
- * Defaults source: CONTEXT.md "Implementation defaults the planner should
- * ship as-is" section. Holiday-merge semantics: Plan 03.1-04 — purely
- * additive YAML, US-federal auto-computed.
+ * Plan 03.1-05 BREAKING CHANGES from v1.0:
+ *   - REMOVED: stale_threshold_business_days, reping_interval_business_days,
+ *     max_pings_per_pr (their semantics are subsumed by the schedule).
+ *   - ADDED: ping_schedule_business_days (single source of truth for cadence
+ *     and per-PR ping cap).
  */
 function loadStaleCheckConfig(yamlText) {
     const parsed = (0,yaml_dist/* parse */.qg)(yamlText);
@@ -61497,11 +61592,13 @@ function loadStaleCheckConfig(yamlText) {
     const autoFederal = computeUsFederalHolidays({
         yearsAhead: STALE_CHECK_HOLIDAY_YEARS_AHEAD,
     });
-    // Empty / null / undefined YAML body → no YAML extras; auto-federal alone.
+    // Empty / null / undefined YAML body → no YAML extras; auto-federal alone +
+    // locked defaults.
     if (parsed === null || parsed === undefined) {
         return {
             holidays: Object.freeze([...autoFederal]),
-            ...STALE_CHECK_NON_HOLIDAY_DEFAULTS,
+            maxAgeDays: STALE_CHECK_MAX_AGE_DAYS_DEFAULT,
+            pingScheduleBusinessDays: Object.freeze([...STALE_CHECK_DEFAULT_PING_SCHEDULE]),
         };
     }
     if (typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -61532,24 +61629,14 @@ function loadStaleCheckConfig(yamlText) {
     // ordering, so the consumer (businessDaysBetween) doesn't depend on YAML
     // declaration order.
     const merged = Object.freeze([...new Set([...autoFederal, ...yamlExtras])].sort());
-    const staleThresholdBusinessDays = root.stale_threshold_business_days === undefined
-        ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.staleThresholdBusinessDays
-        : requireNonNegativeInteger('stale_threshold_business_days', root.stale_threshold_business_days);
     const maxAgeDays = root.max_age_days === undefined
-        ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.maxAgeDays
+        ? STALE_CHECK_MAX_AGE_DAYS_DEFAULT
         : requirePositiveInteger('max_age_days', root.max_age_days);
-    const repingIntervalBusinessDays = root.reping_interval_business_days === undefined
-        ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.repingIntervalBusinessDays
-        : requireNonNegativeInteger('reping_interval_business_days', root.reping_interval_business_days);
-    const maxPingsPerPr = root.max_pings_per_pr === undefined
-        ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.maxPingsPerPr
-        : requirePositiveInteger('max_pings_per_pr', root.max_pings_per_pr);
+    const pingScheduleBusinessDays = parseAndValidatePingSchedule(root.ping_schedule_business_days, STALE_CHECK_DEFAULT_PING_SCHEDULE);
     return {
         holidays: merged,
-        staleThresholdBusinessDays,
         maxAgeDays,
-        repingIntervalBusinessDays,
-        maxPingsPerPr,
+        pingScheduleBusinessDays,
     };
 }
 
@@ -62345,35 +62432,46 @@ async function processOnePrForStaleCheck(deps, owner, repo, pr, cfg, holidays, t
         deps.logger.info(`stale-check skipped: too-old (PR #${prNumber}, age=${Math.round(ageDays)}d)`);
         return;
     }
-    // Filter step 6: too young (business days).
+    // Compute businessDaysOpen — used by the schedule check below. (Same
+    // right-exclusive businessDaysBetween call as before.)
     const createdAtISO = pr.created_at.slice(0, 10);
     const businessDaysOpen = businessDaysBetween(createdAtISO, todayISO, holidays);
-    if (businessDaysOpen < cfg.staleThresholdBusinessDays) {
-        deps.logger.info(`stale-check skipped: too-young (PR #${prNumber}, business_days_open=${businessDaysOpen})`);
-        return;
-    }
-    // Filter step 7: reping cooldown.
-    const lastPinged = parseStalePingedAt(body);
-    if (lastPinged !== null) {
-        const sinceLastPing = businessDaysBetween(lastPinged, todayISO, holidays);
-        if (sinceLastPing < cfg.repingIntervalBusinessDays) {
-            deps.logger.info(`stale-check skipped: reping-cooldown (PR #${prNumber}, business_days_since_last=${sinceLastPing})`);
-            return;
-        }
-    }
-    // Filter step 8 already handled at the run-level; per-PR is a no-op here.
-    // Filter step 9: max pings reached. Marker value is a STRING (D-02 / FND-06
+    // Filter step 6 (collapsed by Plan 03.1-05): schedule-driven eligibility.
+    // The old steps 6 (too-young vs single threshold) + 7 (reping cooldown) + 9
+    // (max-pings-per-pr cap) collapse into a single rule keyed off the schedule
+    // shape: fire ping K (1-indexed, K = currentPingCount + 1) when
+    //   businessDaysOpen >= schedule[K-1] AND currentPingCount === K-1
+    // Otherwise:
+    //   - currentPingCount >= schedule.length → max-pings-reached
+    //   - businessDaysOpen < schedule[currentPingCount] → too-young
+    //
+    // The marker value parseStalePingCount returns is a STRING (D-02 / FND-06
     // parity); integer-parse exactly once via Number.parseInt with explicit
-    // radix and NaN-fallback to 0.
+    // radix and NaN-fallback to 0. parseStalePingedAt is no longer consulted
+    // for eligibility (cooldown semantics are subsumed by the K-1 alignment
+    // between ping_count and schedule index), but the stale_pinged_at marker
+    // is still WRITTEN on each ping below for historical audit.
     const countStr = parseStalePingCount(body);
     const parsedCount = countStr === null ? 0 : Number.parseInt(countStr, 10);
     const safeCurrentCount = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 0;
-    if (safeCurrentCount >= cfg.maxPingsPerPr) {
-        deps.logger.info(`stale-check skipped: max-pings-reached (PR #${prNumber}, count=${safeCurrentCount})`);
+    const schedule = cfg.pingScheduleBusinessDays;
+    if (safeCurrentCount >= schedule.length) {
+        deps.logger.info(`stale-check skipped: max-pings-reached (PR #${prNumber}, count=${safeCurrentCount}, schedule_length=${schedule.length})`);
         return;
     }
-    // Eligible — fire the ping (thread reply only; root-reaction-free per
-    // STAT-01 re-lock 2026-05-08).
+    // Safe by the length check above — schedule[safeCurrentCount] is in-bounds.
+    const nextScheduleEntry = schedule[safeCurrentCount];
+    if (businessDaysOpen < nextScheduleEntry) {
+        deps.logger.info(`stale-check skipped: too-young (PR #${prNumber}, business_days_open=${businessDaysOpen}, next_threshold=${nextScheduleEntry}, ping_count=${safeCurrentCount})`);
+        return;
+    }
+    // Eligible to fire ping K = safeCurrentCount + 1. Final-ping iff
+    // K === schedule.length (i.e. the new count exactly fills the schedule).
+    const nextCount = safeCurrentCount + 1;
+    const isFinal = nextCount === schedule.length;
+    // Filter step 8 already handled at the run-level; per-PR is a no-op here.
+    // Fire the ping (thread reply only; root-reaction-free per STAT-01 re-lock
+    // 2026-05-08 — see <critical_invariants> in PLAN.md).
     const warn = (msg) => deps.logger.warning(msg);
     const authorLogin = pr.user?.login ?? '';
     const authorMention = resolve(authorLogin, deps.config.users, { warn });
@@ -62381,17 +62479,23 @@ async function processOnePrForStaleCheck(deps, owner, repo, pr, cfg, holidays, t
         .map((r) => r.login)
         .filter((l) => typeof l === 'string' && l.length > 0);
     const reviewerMentions = resolveAll(reviewerLogins, deps.config.users, { warn });
-    const replyText = formatStalePingReply({ businessDaysOpen, authorMention, reviewerMentions });
+    // Branch on isFinal: select the final-ping escalation formatter when the
+    // ping about to fire is the last entry of the schedule. The intermediate
+    // formatter is preserved verbatim for K < schedule.length.
+    const replyText = isFinal
+        ? formatStaleFinalPingReply({ businessDaysOpen, authorMention, reviewerMentions })
+        : formatStalePingReply({ businessDaysOpen, authorMention, reviewerMentions });
     const reply = buildThreadReply({ text: replyText });
     const channel = deps.config.channel.channel;
     const postOk = await postThreadReply(deps, channel, threadTs, reply.blocks, replyText, prNumber);
     if (!postOk)
         return; // postThreadReply already tier-mapped the error.
-    // Increment count + write both new markers via the existing patchWithRetry.
-    const nextCount = safeCurrentCount + 1;
+    // Increment count + write both markers via the existing patchWithRetry.
+    // stale_pinged_at is still written on every ping for historical audit even
+    // though the eligibility check no longer reads it.
     const newBody = injectStalePingCount(injectStalePingedAt(body, todayISO), String(nextCount));
     await patchWithRetry(deps, owner, repo, prNumber, newBody);
-    deps.logger.info(`posted stale-ping for PR #${prNumber} (business_days_open=${businessDaysOpen}, ping_count=${nextCount})`);
+    deps.logger.info(`posted stale-ping for PR #${prNumber} (business_days_open=${businessDaysOpen}, ping_count=${nextCount}, final=${isFinal})`);
 }
 // --- Bootstrap (only runs in production; test envs short-circuit) ----------
 async function main() {
@@ -62439,16 +62543,17 @@ async function main() {
             channel: loadChannelConfig(channelYaml),
             staleCheck,
         };
-        // WR-04 — production safety guard. The D3 relaxation makes
-        // reping_interval_business_days=0 a valid schema value (the Phase 3.1
-        // keystone needs it). In production with a frequent cron, however, 0
-        // disables the per-PR cooldown — every run re-pings eligible PRs, capped
-        // only by max_pings_per_pr. That cap can be exhausted in a single
-        // afternoon. Surface a startup warning so operators see the risk in the
-        // Actions run; one-time log (not per-PR). This is intentional permissive
-        // mode — we DO NOT setFailed because the keystone path is legitimate.
-        if (staleCheck !== undefined && staleCheck.repingIntervalBusinessDays === 0) {
-            warning('config/stale-check.yml: reping_interval_business_days=0 disables the stale-check cooldown — every cron run will re-ping eligible PRs, capped only by max_pings_per_pr. Set to >=1 for production.');
+        // WR-04 — production safety guard (Plan 03.1-05 consolidated form). The
+        // schedule shape allows pingScheduleBusinessDays[0]===0 (every cron run
+        // re-pings the same PR until ping count advances to schedule.length —
+        // useful for testing and high-velocity repos, risky in production).
+        // Surface a one-time startup warning so operators see the risk in the
+        // Actions run. Intentional permissive mode — DO NOT setFailed; the
+        // sandbox / keystone path with schedule [0] is legitimate.
+        if (staleCheck !== undefined &&
+            staleCheck.pingScheduleBusinessDays.length > 0 &&
+            staleCheck.pingScheduleBusinessDays[0] === 0) {
+            warning('config/stale-check.yml: ping_schedule_business_days[0]=0 — first ping fires same-day eligible; every cron run will re-ping until ping count advances. Set to >=1 for production.');
         }
         const slack = new dist.WebClient(slackToken);
         const octokit = getOctokit(githubToken);
