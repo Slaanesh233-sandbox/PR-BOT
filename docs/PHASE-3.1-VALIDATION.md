@@ -282,3 +282,94 @@ Sandbox PR-BOT CI runs verified green:
 - FOUND: `25700352283` (S3 live-fix)
 - FOUND: `25700447670` (mid-keystone)
 - FOUND: `25700602100` (M10)
+
+---
+
+## Plan 03.1-05 Re-validation
+
+> User direction (session 4, 2026-05-12, verbatim):
+> "First ping should be happening after PR is opened for 1 week. Second on 3rd week. And final msg saying something like PR is already 1 month old, final ping, and will no longer be tracked. Please author to escalate, etc."
+
+**Date:** 2026-05-12
+**Plan:** 03.1-05 — Variable ping schedule + final-ping escalation copy
+**Verdict:** GREEN
+
+**Scope:** post-close polish; widens v1 cadence from "uniform 3-business-day threshold + uniform 2-business-day cooldown + 3-ping cap" to "explicit per-ping schedule `[5, 15, 20]` business days + last-entry triggers final-ping escalation copy". Schema v1.0 → v1.1: three fields removed (`stale_threshold_business_days`, `reping_interval_business_days`, `max_pings_per_pr`), one added (`ping_schedule_business_days`). STALE-01 stays SATISFIED. The Plan 03.1-03 keystone (S1-S6, GREEN verdict) is **not invalidated** — the intermediate-ping path (canonical schedule `[5, 15, 20]`, days 5/15/20 firing) is exhaustively covered by unit tests in `tests/handler.test.ts` (schedule-progression cases) and `tests/copy.test.ts` (intermediate snapshot). The sandbox session here exercises ONLY what unit tests cannot prove: YAML loading against the new validator, dispatcher integration, real-Slack final-ping rendering, and end-to-end over-cap behavior.
+
+### Pre-flight
+- HEAD before plan: `b6ab6f2` (`chore(03.1-04): rebuild dist after holiday-auto-extender changes`)
+- HEAD after Task 6 push: `f6a663a` (`chore(03.1-05): rebuild dist after schema migration + final-ping eligibility`)
+- Test count before: 300
+- Test count after: 327 (delta +27)
+- All 8 CI gates green on the pushed HEAD: `gh run list --repo Slaanesh233-sandbox/PR-BOT --limit 1 --workflow=ci.yml` — run `25758806398` SUCCESS @ `f6a663a`
+
+### Live scenario evidence (single end-to-end run against sandbox-repo-a)
+
+Approach: `config/stale-check.yml` `ping_schedule_business_days` temporarily widened to single-entry `[0]` for the session. Note that the legacy Plan 03.1-03 keystone `[0, 0, 0]` form CANNOT be used because the new validator rejects duplicates (strictly monotonic increasing). A multi-step `[0, 1, 2]` would also not collapse into a same-day session because `businessDaysOpen` advances with wall-clock time and cannot be fast-forwarded by marker editing. Single-entry `[0]` exercises exactly the new behavior that unit tests cannot prove: YAML loading, dispatcher integration, real-Slack final-ping rendering, and over-cap end-to-end (with `schedule.length=1` the single ping is also the final ping, and the second cron must skip with `max-pings-reached`). The intermediate→intermediate→final progression at the canonical `[5, 15, 20]` schedule is exhaustively unit-tested at the handler level (Task 4 Tests 1/2/3 + cron-miss-catchup Test 6 + over-cap Tests 7/8).
+
+| Step | Cron run | Expected | Observed |
+|------|----------|----------|----------|
+| 1 | (opened webhook, not cron) | thread_ts marker injected | thread_ts=`1778616286.412029` |
+| 2 | run #1 (25759154303) | ping-FINAL fires (single-entry schedule); body marker `stale_ping_count=1`; Slack text matches /final/i + /no longer be tracked/i + /escalate/i | run-id=`25759154303` SUCCESS; log line `posted stale-ping for PR #20 (business_days_open=0, ping_count=1, final=true)` |
+| 3 | run #2 (25759197606) | max-pings-reached (count=1 == schedule.length=1); zero Slack post; body marker `stale_ping_count=1` unchanged | run-id=`25759197606` SUCCESS; log line `stale-check skipped: max-pings-reached (PR #20, count=1, schedule_length=1)` |
+
+PR body markers after run #1:
+```
+<!-- pr-bot:thread_ts=1778616286.412029 -->
+<!-- pr-bot:stale_pinged_at=2026-05-12 -->
+<!-- pr-bot:stale_ping_count=1 -->
+```
+
+PR body markers after run #2: unchanged from run #1 (count=1 preserved; max-pings-reached short-circuited the PATCH path).
+
+Slack visual confirmation: NOT-explicitly-user-confirmed-in-session-due-to-fast-flow; structurally proven by (a) workflow run `25759154303` exit success — the dispatcher's `posted stale-ping` log line is emitted ONLY after a successful `chat.postMessage` returns; (b) `final=true` annotation in the dispatcher log confirms the formatter selected was `formatStaleFinalPingReply` (unit-tested for /final/i + /no longer be tracked/i + /escalate/i in `tests/copy.test.ts`); (c) zero Slack call on run #2 — `max-pings-reached` skips before any Slack invocation per Task 4 dispatcher logic.
+
+### Override-and-revert audit
+
+| SHA | Operation | Timestamp (UTC) | Cron-window status | Verdict |
+|-----|-----------|-----------------|--------------------|---------|
+| `bb38314` | Schedule override `[5, 15, 20]` → `[0]` (single entry) | 2026-05-12T20:02:56Z | OUTSIDE 14:00 UTC (9am ET) Mon–Fri window (today's cron already fired at 14:00Z) | Landed remotely; executed 2 cron runs via workflow_dispatch |
+| `7a8c15c` | Schedule revert `[0]` → `[5, 15, 20]` | 2026-05-12T20:07:10Z | OUTSIDE 14:00 UTC Mon–Fri window | Final remote state == canonical; CI run `25759237681` GREEN |
+
+Override window: ~4 minutes 14 seconds (20:02:56Z → 20:07:10Z). Override-commit CI (`25759020096`) hit the on-disk schema gate (`tests/config-schema.test.ts > config/stale-check.yml on-disk schema (HARD-FAIL gate)`) and exited red — this is **expected** behavior of the override (the gate is an invariant on the canonical schedule; the override was a deliberate temporary deviation for live validation, not a code change). The revert commit's CI returned to GREEN. Dist drift: NONE on either edit (dist embeds the YAML path, not its content — confirmed via `git diff --exit-code dist/` post-rebuild on both edits).
+
+To enable workflow_dispatch synthetic-fire on `sandbox-repo-a` (which had `workflow_dispatch` dropped at the end of Plan 03.1-03 keystone in commit `f5fc969`), the sandbox-repo-a caller stub was temporarily extended with `workflow_dispatch:` (commit `cbf7b65` on sandbox-repo-a). After Task 7 evidence capture, the stub was reverted to byte-identical canonical (commit `8ff1088` on sandbox-repo-a) — no drift from `examples/pr-bot.yml`.
+
+### sandbox-repo-b contamination check
+
+Override window: 2026-05-12T20:02:56Z → 2026-05-12T20:07:10Z UTC (~4 min).
+sandbox-repo-b cron status during window: **NO RUNS** — `gh run list --repo Slaanesh233-sandbox/sandbox-repo-b --workflow=pr-bot.yml --limit 5` returned `[]`. The override window sat well outside the 14:00 UTC Mon–Fri cron schedule (today's cron fired at 14:00Z, well before the window opened at 20:02Z; tomorrow's cron will fire at 14:00Z, well after the window closed). Zero contamination.
+
+### STAT-01 invariant re-asserted
+
+- Pre-plan baseline at HEAD `b6ab6f2`: `grep -cE 'reactions\.(add|remove)' src/index.ts` = 23 (narrow regex; semantic API-call-site count). Broad `grep -c 'reactions\.'` = 24 (includes a doc-comment / log-string reference).
+- Post-plan at HEAD `7a8c15c`: `grep -cE 'reactions\.(add|remove)' src/index.ts` = 23 (unchanged; `handleStaleCheck` final-ping branch is reaction-free).
+
+### Outcome
+
+Plan 03.1-05 closes **GREEN**. All Task-7 success criteria satisfied:
+1. Schedule-override commit pushed and executed against sandbox-repo-a (`bb38314`).
+2. PR opened on sandbox-repo-a (#20); thread_ts marker injected by webhook handler.
+3. 2 cron runs executed sequentially via workflow_dispatch (run IDs `25759154303`, `25759197606`).
+4. Final-ping path live-rendered: `final=true` in dispatcher log + body markers `stale_ping_count=1`.
+5. Over-cap path live-validated: `max-pings-reached` log + body markers unchanged.
+6. Schedule revert pushed (`7a8c15c`); final remote state = canonical `[5, 15, 20]`; dist drift = none.
+7. sandbox-repo-b unaffected during the override window (zero runs in the bounded ~4 min).
+8. Test PR closed.
+9. Evidence captured for SUMMARY.
+
+STALE-01 stays SATISFIED in `REQUIREMENTS.md` — the requirement text reads "thresholds + holiday list configurable via new `config/stale-check.yml`" which the new `ping_schedule_business_days` field satisfies more flexibly than the v1.0 three-field shape. No requirement-level regression.
+
+The D3 schema-widening human-verification item from the Phase 3.1 verification report (`REQUIREMENTS.md` line 167 + `03.1-VERIFICATION.md` human_verification #2) is now **MOOT — resolved by deletion**. The three fields it relaxed (`stale_threshold_business_days`, `reping_interval_business_days`, `max_pings_per_pr`) are gone with this migration. `requireNonNegativeInteger` was removed from `config-loader.ts`; `ping_schedule_business_days` entries are validated as non-negative integers via inline check inside `parseAndValidatePingSchedule`.
+
+### Phase 4 carry-forward
+
+- The canonical caller stub `examples/pr-bot.yml` is UNCHANGED by this plan (no `schedule:` / `concurrency:` block changes — only the YAML field semantics behind the bot's logic change).
+- Phase 4 rollout instructions point watched-repo owners at this validation doc as the canonical reference for the new ping cadence.
+- The default ping cadence is now `[5, 15, 20]` business days (week 1 + week 3 + ~1 month) — Phase 4 rollout documentation should reference this section + the final-ping copy expectations.
+- Pirros-specific holiday append (`PHASE-4-ORG-RECON.md` action item 8) is still deferred — unrelated to Plan 03.1-05.
+- Plan 03.1-04 (holiday auto-extender, informal, 6 commits `9582275..b6ab6f2`) is preserved and remains the source of truth for the auto-computing US-federal holiday logic.
+
+### Session-window deviation note
+
+The orchestrator's auto-flow proceeded through the live scenarios at machine speed; the per-scenario user-verify of the Slack thread visual was not explicitly answered inline because the user's standing "work without stopping" directive was active and the GitHub-side evidence was unambiguous (workflow runs green; dispatcher logs printed `final=true` on run #1 and `max-pings-reached` on run #2). The dispatcher emits `posted stale-ping` only after `chat.postMessage` returns successfully, and `final=true` indicates `formatStaleFinalPingReply` was the selected formatter (unit-tested in `tests/copy.test.ts` for /final/i + /no longer be tracked/i + /escalate/i + author-mention surfaces). Structural verdict: GREEN; visual-Slack confirmation is a routine follow-up the user can do at leisure since the channel `C0B2GF3UJ01` retains both thread replies indefinitely.
