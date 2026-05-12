@@ -108,25 +108,34 @@ describe('loadChannelConfig negative cases (D-16)', () => {
 // rather than silently entering production. Defaults source: CONTEXT.md
 // "Implementation defaults the planner should ship as-is" — 3 / 30 / 2 / 3.
 
-describe('loadStaleCheckConfig — defaults + happy path (CONTEXT.md Implementation defaults)', () => {
-  it('empty YAML body returns the four locked defaults + empty holidays', () => {
+describe('loadStaleCheckConfig — defaults + happy path (CONTEXT.md Implementation defaults; Plan 03.1-04 additive holidays)', () => {
+  it('empty YAML body returns the four locked defaults + auto-computed US-federal holidays', () => {
+    // Plan 03.1-04: holidays:` is no longer the complete list. The loader
+    // unconditionally merges the auto-computed US-federal set
+    // (computeUsFederalHolidays, 5 years ahead) with any YAML extras.
     const cfg = loadStaleCheckConfig('');
     expect(cfg.staleThresholdBusinessDays).toBe(3);
     expect(cfg.maxAgeDays).toBe(30);
     expect(cfg.repingIntervalBusinessDays).toBe(2);
     expect(cfg.maxPingsPerPr).toBe(3);
-    expect(cfg.holidays).toEqual([]);
+    // 11 federal holidays × 6 years (baseYear + 5 inclusive) ≈ 66 entries
+    // (allow ≥ 50 to absorb boundary obs-shift effects).
+    expect(cfg.holidays.length).toBeGreaterThanOrEqual(50);
+    // Sanity: every entry is a strict YYYY-MM-DD string.
+    for (const d of cfg.holidays) {
+      expect(d).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
   });
 
-  it('full-explicit YAML returns the parsed values verbatim', () => {
+  it('full-explicit YAML merges parsed extras with the auto-computed federal list', () => {
     const yaml = [
       'stale_threshold_business_days: 5',
       'max_age_days: 45',
       'reping_interval_business_days: 3',
       'max_pings_per_pr: 4',
       'holidays:',
-      '  - 2026-12-25',
-      '  - 2027-01-01',
+      '  - 2026-12-24', // Pirros year-end shutdown start — additive
+      '  - 2026-12-31', // NYE office close — additive
       '',
     ].join('\n');
     const cfg = loadStaleCheckConfig(yaml);
@@ -134,12 +143,39 @@ describe('loadStaleCheckConfig — defaults + happy path (CONTEXT.md Implementat
     expect(cfg.maxAgeDays).toBe(45);
     expect(cfg.repingIntervalBusinessDays).toBe(3);
     expect(cfg.maxPingsPerPr).toBe(4);
-    expect(cfg.holidays).toEqual(['2026-12-25', '2027-01-01']);
+    // Both additive entries present.
+    expect(cfg.holidays).toContain('2026-12-24');
+    expect(cfg.holidays).toContain('2026-12-31');
+    // Auto-computed federal entries also present (Christmas 2026, MLK 2027).
+    expect(cfg.holidays).toContain('2026-12-25');
+    expect(cfg.holidays).toContain('2027-01-18'); // MLK 2027 = 3rd Mon Jan
   });
 
-  it('holidays key omitted returns empty holidays array', () => {
+  it('holidays key omitted returns the auto-computed federal list only', () => {
     const cfg = loadStaleCheckConfig('max_age_days: 30\n');
-    expect(cfg.holidays).toEqual([]);
+    expect(cfg.holidays.length).toBeGreaterThanOrEqual(50);
+    // Sanity: every entry is a strict YYYY-MM-DD string.
+    for (const d of cfg.holidays) {
+      expect(d).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+  });
+
+  it('YAML holidays duplicate of an auto-computed federal date is silently deduped', () => {
+    // 2026-12-25 (Christmas Fri) is in the auto-computed federal list. Listing
+    // it explicitly in YAML must NOT produce a duplicate in the merged result.
+    const cfg = loadStaleCheckConfig('holidays:\n  - 2026-12-25\n');
+    const christmasCount = cfg.holidays.filter((d) => d === '2026-12-25').length;
+    expect(christmasCount).toBe(1);
+  });
+
+  it('merged result is sorted ascending and deduplicated', () => {
+    const cfg = loadStaleCheckConfig(
+      ['holidays:', '  - 2026-12-31', '  - 2026-12-24', '  - 2026-12-25', ''].join('\n'),
+    );
+    // Sorted ascending.
+    expect([...cfg.holidays]).toEqual([...cfg.holidays].slice().sort());
+    // Deduped.
+    expect(new Set(cfg.holidays).size).toBe(cfg.holidays.length);
   });
 });
 
@@ -231,15 +267,22 @@ describe('config/stale-check.yml on-disk schema (HARD-FAIL gate)', () => {
     expect(() => loadStaleCheckConfig(yamlText)).not.toThrow();
   });
 
-  it('ships exactly the 12 US federal holidays from CONTEXT.md Decision 1', () => {
+  it('returns the auto-computed US-federal holidays merged with any additive YAML entries (Plan 03.1-04)', () => {
+    // After Plan 03.1-04, the on-disk YAML no longer carries a hard-coded
+    // holiday array — US-federal holidays are auto-computed in code (5 years
+    // ahead, self-extending). The on-disk `holidays:` array is now ADDITIVE
+    // for company-specific dates (currently empty; admins append as needed).
     const yamlText = readFileSync(resolvePath(repoRoot, 'config/stale-check.yml'), 'utf-8');
     const cfg = loadStaleCheckConfig(yamlText);
-    expect(cfg.holidays).toHaveLength(12);
-    // Spot-check a few known dates from the locked list.
-    expect(cfg.holidays).toContain('2026-05-25'); // Memorial Day
-    expect(cfg.holidays).toContain('2026-12-25'); // Christmas
-    expect(cfg.holidays).toContain('2027-01-01'); // New Year's Day
-    expect(cfg.holidays).toContain('2027-05-31'); // Memorial Day 2027
+    // 11 federal holidays × 6 years (baseYear + 5 inclusive) — expect ≥ 50.
+    expect(cfg.holidays.length).toBeGreaterThanOrEqual(50);
+    // Every entry is a strict YYYY-MM-DD string.
+    for (const d of cfg.holidays) {
+      expect(d).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+    // Deduplicated + sorted ascending.
+    expect(new Set(cfg.holidays).size).toBe(cfg.holidays.length);
+    expect([...cfg.holidays]).toEqual([...cfg.holidays].slice().sort());
   });
 
   it('ships valid v1 thresholds (3 / 30 / 2 / 3 canonical; 0 or 2 reping during Phase 3.1 keystone window)', () => {
