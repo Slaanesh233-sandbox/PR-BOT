@@ -151,13 +151,17 @@ export interface ReopenSummary {
 // === Phase 3.1 — stale-check config type ====================================
 //
 // Validated by loadStaleCheckConfig (config-loader.ts) against config/stale-check.yml.
-// Defaults applied when keys absent — see config-loader.ts JSDoc for the locked
-// defaults (3 / 30 / 2 / 3 per CONTEXT.md "Implementation defaults the planner
-// should ship as-is").
+// Defaults applied when keys absent — see config-loader.ts JSDoc.
 //
 // `holidays` is the raw list from YAML; the dispatcher in Plan 03.1-02 wraps
 // it (or passes through directly — the businessDaysBetween helper accepts both
 // shapes via the Holidays type alias).
+//
+// Plan 03.1-05 schema migration (2026-05-12) — REPLACES the three v1 fields
+// (staleThresholdBusinessDays, repingIntervalBusinessDays, maxPingsPerPr) with
+// a single explicit per-ping schedule: pingScheduleBusinessDays. The last entry
+// triggers the final-ping escalation copy (formatStaleFinalPingReply). Default
+// when YAML key absent: [5, 15, 20] = week 1 + week 3 + ~month 1.
 //
 // FORBIDDEN FIELDS (do not add to v1; deferred per CONTEXT.md "Deferred ideas"):
 //   - per_repo_overrides
@@ -165,13 +169,18 @@ export interface ReopenSummary {
 //   - silent_PRs_list
 //   - escalation_steps
 //   - mute_via_comment_token
+//   - staleThresholdBusinessDays (REMOVED by Plan 03.1-05; semantics subsumed
+//     by pingScheduleBusinessDays[0] as the first eligibility threshold)
+//   - repingIntervalBusinessDays (REMOVED by Plan 03.1-05; cooldown semantics
+//     subsumed by the schedule[K-1] alignment — ping K fires when
+//     businessDaysOpen >= schedule[K-1] AND currentPingCount === K-1)
+//   - maxPingsPerPr (REMOVED by Plan 03.1-05; cap is now schedule.length —
+//     the validator bounds the array to length 1..10)
 
 export interface StaleCheckConfig {
   readonly holidays: readonly string[];
-  readonly staleThresholdBusinessDays: number;
   readonly maxAgeDays: number;
-  readonly repingIntervalBusinessDays: number;
-  readonly maxPingsPerPr: number;
+  readonly pingScheduleBusinessDays: readonly number[];
 }
 
 // Event-router output (consumed by event-router.ts in Plan 03b): a description of what to do,

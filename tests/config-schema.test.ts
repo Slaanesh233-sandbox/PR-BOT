@@ -108,16 +108,15 @@ describe('loadChannelConfig negative cases (D-16)', () => {
 // rather than silently entering production. Defaults source: CONTEXT.md
 // "Implementation defaults the planner should ship as-is" — 3 / 30 / 2 / 3.
 
-describe('loadStaleCheckConfig — defaults + happy path (CONTEXT.md Implementation defaults; Plan 03.1-04 additive holidays)', () => {
-  it('empty YAML body returns the four locked defaults + auto-computed US-federal holidays', () => {
+describe('loadStaleCheckConfig — defaults + happy path (Plan 03.1-04 additive holidays + Plan 03.1-05 schedule defaults)', () => {
+  it('empty YAML body returns locked defaults (max_age_days=30, schedule=[5,15,20]) + auto-computed US-federal holidays', () => {
     // Plan 03.1-04: holidays:` is no longer the complete list. The loader
     // unconditionally merges the auto-computed US-federal set
     // (computeUsFederalHolidays, 5 years ahead) with any YAML extras.
+    // Plan 03.1-05: schedule defaults to [5, 15, 20] when absent.
     const cfg = loadStaleCheckConfig('');
-    expect(cfg.staleThresholdBusinessDays).toBe(3);
     expect(cfg.maxAgeDays).toBe(30);
-    expect(cfg.repingIntervalBusinessDays).toBe(2);
-    expect(cfg.maxPingsPerPr).toBe(3);
+    expect([...cfg.pingScheduleBusinessDays]).toEqual([5, 15, 20]);
     // 11 federal holidays × 6 years (baseYear + 5 inclusive) ≈ 66 entries
     // (allow ≥ 50 to absorb boundary obs-shift effects).
     expect(cfg.holidays.length).toBeGreaterThanOrEqual(50);
@@ -125,30 +124,6 @@ describe('loadStaleCheckConfig — defaults + happy path (CONTEXT.md Implementat
     for (const d of cfg.holidays) {
       expect(d).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     }
-  });
-
-  it('full-explicit YAML merges parsed extras with the auto-computed federal list', () => {
-    const yaml = [
-      'stale_threshold_business_days: 5',
-      'max_age_days: 45',
-      'reping_interval_business_days: 3',
-      'max_pings_per_pr: 4',
-      'holidays:',
-      '  - 2026-12-24', // Pirros year-end shutdown start — additive
-      '  - 2026-12-31', // NYE office close — additive
-      '',
-    ].join('\n');
-    const cfg = loadStaleCheckConfig(yaml);
-    expect(cfg.staleThresholdBusinessDays).toBe(5);
-    expect(cfg.maxAgeDays).toBe(45);
-    expect(cfg.repingIntervalBusinessDays).toBe(3);
-    expect(cfg.maxPingsPerPr).toBe(4);
-    // Both additive entries present.
-    expect(cfg.holidays).toContain('2026-12-24');
-    expect(cfg.holidays).toContain('2026-12-31');
-    // Auto-computed federal entries also present (Christmas 2026, MLK 2027).
-    expect(cfg.holidays).toContain('2026-12-25');
-    expect(cfg.holidays).toContain('2027-01-18'); // MLK 2027 = 3rd Mon Jan
   });
 
   it('holidays key omitted returns the auto-computed federal list only', () => {
@@ -204,38 +179,6 @@ describe('loadStaleCheckConfig — negative cases (HARD-FAIL on schema violation
     );
   });
 
-  it('accepts stale_threshold_business_days: 0 (non-negative; 0 = every PR eligible)', () => {
-    // Plan 03.1-03 keystone M5 → M10 Option-B override relies on this. Zero is a
-    // semantically meaningful setting (no minimum staleness). The schema floor for
-    // staleThresholdBusinessDays + repingIntervalBusinessDays is 0; the floor for
-    // maxAgeDays + maxPingsPerPr stays at 1 (their zero-state has no meaning).
-    const cfg = loadStaleCheckConfig('stale_threshold_business_days: 0\n');
-    expect(cfg.staleThresholdBusinessDays).toBe(0);
-  });
-
-  it('throws when stale_threshold_business_days is negative', () => {
-    expect(() => loadStaleCheckConfig('stale_threshold_business_days: -1\n')).toThrow(
-      /stale-check\.yml schema.*stale_threshold_business_days.*non-negative integer/,
-    );
-  });
-
-  it('accepts reping_interval_business_days: 0 (non-negative; 0 = no cooldown)', () => {
-    const cfg = loadStaleCheckConfig('reping_interval_business_days: 0\n');
-    expect(cfg.repingIntervalBusinessDays).toBe(0);
-  });
-
-  it('throws when reping_interval_business_days is negative', () => {
-    expect(() => loadStaleCheckConfig('reping_interval_business_days: -1\n')).toThrow(
-      /stale-check\.yml schema.*reping_interval_business_days.*non-negative integer/,
-    );
-  });
-
-  it('throws when stale_threshold_business_days is a string', () => {
-    expect(() => loadStaleCheckConfig('stale_threshold_business_days: "3"\n')).toThrow(
-      /stale-check\.yml schema/,
-    );
-  });
-
   it('throws when max_age_days is negative', () => {
     expect(() => loadStaleCheckConfig('max_age_days: -1\n')).toThrow(
       /stale-check\.yml schema.*max_age_days/,
@@ -245,18 +188,6 @@ describe('loadStaleCheckConfig — negative cases (HARD-FAIL on schema violation
   it('throws when max_age_days is 0 (still must be positive)', () => {
     expect(() => loadStaleCheckConfig('max_age_days: 0\n')).toThrow(
       /stale-check\.yml schema.*max_age_days.*positive integer/,
-    );
-  });
-
-  it('throws when max_pings_per_pr is a float (non-integer)', () => {
-    expect(() => loadStaleCheckConfig('max_pings_per_pr: 3.5\n')).toThrow(
-      /stale-check\.yml schema.*max_pings_per_pr/,
-    );
-  });
-
-  it('throws when max_pings_per_pr is 0 (still must be positive)', () => {
-    expect(() => loadStaleCheckConfig('max_pings_per_pr: 0\n')).toThrow(
-      /stale-check\.yml schema.*max_pings_per_pr.*positive integer/,
     );
   });
 });
@@ -413,21 +344,5 @@ describe('config/stale-check.yml on-disk schema (HARD-FAIL gate)', () => {
     // Deduplicated + sorted ascending.
     expect(new Set(cfg.holidays).size).toBe(cfg.holidays.length);
     expect([...cfg.holidays]).toEqual([...cfg.holidays].slice().sort());
-  });
-
-  it('ships valid v1 thresholds (3 / 30 / 2 / 3 canonical; 0 or 2 reping during Phase 3.1 keystone window)', () => {
-    // Phase 3.1 keystone M5 → M10 Option-B override: this file is temporarily
-    // permitted to ship stale_threshold_business_days=0 and reping_interval=0
-    // (M5) or reping_interval=2 (mid-keystone) so Scenarios S3 + S4 can fire.
-    // After M10 the file is reverted to the canonical 3 / 30 / 2 / 3.
-    //
-    // The "locked" floors that always hold: maxAgeDays = 30, maxPingsPerPr = 3.
-    // These are the v1 contract values that are NEVER overridden by the keystone.
-    const yamlText = readFileSync(resolvePath(repoRoot, 'config/stale-check.yml'), 'utf-8');
-    const cfg = loadStaleCheckConfig(yamlText);
-    expect([0, 3]).toContain(cfg.staleThresholdBusinessDays);
-    expect(cfg.maxAgeDays).toBe(30);
-    expect([0, 2]).toContain(cfg.repingIntervalBusinessDays);
-    expect(cfg.maxPingsPerPr).toBe(3);
   });
 });

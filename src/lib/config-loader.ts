@@ -102,12 +102,20 @@ export function loadChannelConfig(yamlText: string): ChannelConfig {
 // Same pattern as loadUsersMap / loadChannelConfig: parseYaml → typeof checks
 // → schema checks → throw with greppable prefix on violation.
 //
-// Locked defaults from CONTEXT.md "Implementation defaults the planner should
-// ship as-is":
-//   - stale_threshold_business_days = 3
-//   - max_age_days = 30
-//   - reping_interval_business_days = 2
-//   - max_pings_per_pr = 3
+// Plan 03.1-05 schema migration (2026-05-12) — the v1.0 three-field shape
+// (stale_threshold_business_days / reping_interval_business_days /
+// max_pings_per_pr) is REPLACED by a single explicit per-ping schedule:
+//   - ping_schedule_business_days: array of non-negative integers, length 1..10,
+//     strictly monotonically increasing. Default when absent: [5, 15, 20]
+//     (week 1 + week 3 + ~month 1). The LAST entry triggers the final-ping
+//     escalation copy (formatStaleFinalPingReply).
+//
+// Eligibility now collapses to a single rule: fire ping K (1-indexed) when
+//   businessDaysOpen >= schedule[K-1] AND currentPingCount === K-1
+// — no separate cooldown or max-pings check is needed.
+//
+// max_age_days remains (positive integer; default 30; calendar-day cap for
+// PRs that should be human-triaged rather than bot-pinged).
 //
 // Holidays (Plan 03.1-04 — auto-computed US-federal merge):
 //   - US-federal holidays for the next 5 years (inclusive of the current UTC
@@ -121,13 +129,20 @@ export function loadChannelConfig(yamlText: string): ChannelConfig {
 
 // Plan 03.1-04: holidays is no longer materialized as a default constant —
 // it's computed at load time so the current UTC year drives the auto-computed
-// US-federal window. The non-holiday defaults remain locked from CONTEXT.md.
-const STALE_CHECK_NON_HOLIDAY_DEFAULTS = {
-  staleThresholdBusinessDays: 3,
-  maxAgeDays: 30,
-  repingIntervalBusinessDays: 2,
-  maxPingsPerPr: 3,
-} as const;
+// US-federal window. Plan 03.1-05: max_age_days remains the only locked
+// non-schedule, non-holiday default; the three obsolete fields are gone.
+const STALE_CHECK_MAX_AGE_DAYS_DEFAULT = 30;
+
+// Plan 03.1-05: default per-ping schedule when ping_schedule_business_days is
+// absent from YAML. Cadence reads: week 1 + week 3 + ~month 1 (business days).
+// The last entry (20) triggers the final-ping escalation copy.
+const STALE_CHECK_DEFAULT_PING_SCHEDULE: readonly number[] = Object.freeze([5, 15, 20]);
+
+// Plan 03.1-05: ping schedule array length floor (must fire at least once) and
+// ceiling (operator sanity: more than ten pings on a single PR is annoyance,
+// not signal). The strictly-monotonic check upstream additionally guarantees
+// no duplicates and no decreasing entries.
+const STALE_CHECK_PING_SCHEDULE_MAX_LENGTH = 10;
 
 // Number of years (inclusive of baseYear) for which US-federal holidays are
 // auto-computed and merged into the on-disk YAML's `holidays:` array.
@@ -152,31 +167,61 @@ function requirePositiveInteger(field: string, value: unknown): number {
   return value;
 }
 
-// Non-negative-integer variant. Semantically zero is a valid setting for
-// stale_threshold_business_days (treat every eligible PR as stale on day 0)
-// and reping_interval_business_days (no cooldown between pings). Both fields
-// are configured numerically — 0 is meaningful, not a sentinel for "absent".
-// The Phase 3.1 keystone (Plan 03.1-03 M5 → M10 Option-B override window)
-// relies on this — without it, the keystone cannot exercise S3 (eligible-fires)
-// on a same-day PR, since GitHub does not allow backdating created_at.
-function requireNonNegativeInteger(field: string, value: unknown): number {
-  if (typeof value !== 'number') {
+// Plan 03.1-05: validate `ping_schedule_business_days`. The value (when
+// present) must be a JS array (Array.isArray), length within [1, 10], every
+// entry a non-negative integer (typeof === 'number' && Number.isInteger), and
+// strictly monotonically increasing (each entry > previous, so duplicates and
+// decreases are rejected). Same `stale-check.yml schema:` throw prefix as the
+// surrounding loader for D-17 parity. Returns a frozen copy of the validated
+// array; falls back to `fallback` when value is undefined.
+//
+// D-02 / FND-06 invariant: every numeric check uses Number.isInteger on a
+// typeof-checked number — no parseFloat, no Number(stringValue), no +string
+// coercion. YAML's parser produces native JS numbers for integer literals; a
+// quoted entry like "20" comes back as a string and fails the typeof check
+// with the index-anchored error message.
+function parseAndValidatePingSchedule(
+  value: unknown,
+  fallback: readonly number[],
+): readonly number[] {
+  if (value === undefined) {
+    return Object.freeze([...fallback]);
+  }
+  if (!Array.isArray(value)) {
     throw new Error(
-      `stale-check.yml schema: ${field} must be a number, got ${typeof value} (${String(value)})`,
+      `stale-check.yml schema: ping_schedule_business_days must be an array, got ${typeof value}`,
     );
   }
-  if (!Number.isInteger(value) || value < 0) {
+  if (value.length === 0) {
     throw new Error(
-      `stale-check.yml schema: ${field} must be a non-negative integer, got ${value}`,
+      `stale-check.yml schema: ping_schedule_business_days must have length >= 1, got empty array`,
     );
   }
-  return value;
+  if (value.length > STALE_CHECK_PING_SCHEDULE_MAX_LENGTH) {
+    throw new Error(
+      `stale-check.yml schema: ping_schedule_business_days must have length <= ${STALE_CHECK_PING_SCHEDULE_MAX_LENGTH}, got ${value.length}`,
+    );
+  }
+  for (let i = 0; i < value.length; i += 1) {
+    const entry = value[i];
+    if (typeof entry !== 'number' || !Number.isInteger(entry) || entry < 0) {
+      throw new Error(
+        `stale-check.yml schema: ping_schedule_business_days[${i}] must be a non-negative integer, got ${String(entry)} (typeof ${typeof entry})`,
+      );
+    }
+    if (i > 0 && entry <= (value[i - 1] as number)) {
+      throw new Error(
+        `stale-check.yml schema: ping_schedule_business_days must be strictly monotonically increasing; entry[${i}]=${entry} is not greater than entry[${i - 1}]=${String(value[i - 1])}`,
+      );
+    }
+  }
+  return Object.freeze([...(value as readonly number[])]);
 }
 
 /**
  * Parse + validate a `config/stale-check.yml` text. Phase 3.1 STALE-01.
  *
- * Schema:
+ * Schema (v1.1 — Plan 03.1-05 migration, 2026-05-12):
  *   - top-level mapping (object); empty/null body allowed (returns all defaults)
  *   - `holidays`: array of ISO-8601 date strings matching /^\d{4}-\d{2}-\d{2}$/.
  *     **ADDITIVE (Plan 03.1-04):** the YAML list is merged with the
@@ -186,26 +231,24 @@ function requireNonNegativeInteger(field: string, value: unknown): number {
  *     day, regional office closures); duplicates with auto-computed federal
  *     dates are silently deduped. Default: [] additive entries (the
  *     auto-computed federal set is always present).
- *   - `stale_threshold_business_days`: non-negative integer (0 = every
- *     eligible PR is stale immediately, no minimum-age window); default 3.
- *     The D3 relaxation from positive-integer is required by the Phase 3.1
- *     keystone (Plan 03.1-03 M5 → M10 Option-B override window) so a
- *     same-day PR can exercise the eligible-fires path.
- *   - `max_age_days`: positive integer; default 30
- *   - `reping_interval_business_days`: non-negative integer (0 = no cooldown
- *     between pings on the same PR — every cron run will re-ping eligible
- *     PRs, capped only by `max_pings_per_pr`); default 2. PRODUCTION SAFETY:
- *     setting this to 0 in production is risky; WR-04 adds a runtime warning
- *     when the loaded value is 0.
- *   - `max_pings_per_pr`: positive integer; default 3
+ *   - `max_age_days`: positive integer; default 30. Calendar-day cap above
+ *     which a PR is exempt from stale-pings (it's human-triage territory).
+ *   - `ping_schedule_business_days`: array of non-negative integers, length
+ *     1..10, strictly monotonically increasing. Default when absent:
+ *     [5, 15, 20] (week 1 + week 3 + ~month 1). The LAST entry triggers the
+ *     final-ping escalation copy (formatStaleFinalPingReply). Eligibility:
+ *     fire ping K when businessDaysOpen >= schedule[K-1] AND
+ *     currentPingCount === K-1.
  *
  * Throws `Error` with prefix `stale-check.yml schema:` on any violation. The
- * dispatcher in Plan 03.1-02 catches these and routes through `core.setFailed`
- * (same D-17 pattern as loadUsersMap / loadChannelConfig).
+ * dispatcher in src/index.ts catches these and routes through
+ * `core.setFailed` (same D-17 pattern as loadUsersMap / loadChannelConfig).
  *
- * Defaults source: CONTEXT.md "Implementation defaults the planner should
- * ship as-is" section. Holiday-merge semantics: Plan 03.1-04 — purely
- * additive YAML, US-federal auto-computed.
+ * Plan 03.1-05 BREAKING CHANGES from v1.0:
+ *   - REMOVED: stale_threshold_business_days, reping_interval_business_days,
+ *     max_pings_per_pr (their semantics are subsumed by the schedule).
+ *   - ADDED: ping_schedule_business_days (single source of truth for cadence
+ *     and per-PR ping cap).
  */
 export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
   const parsed = parseYaml(yamlText) as unknown;
@@ -218,11 +261,13 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
     yearsAhead: STALE_CHECK_HOLIDAY_YEARS_AHEAD,
   });
 
-  // Empty / null / undefined YAML body → no YAML extras; auto-federal alone.
+  // Empty / null / undefined YAML body → no YAML extras; auto-federal alone +
+  // locked defaults.
   if (parsed === null || parsed === undefined) {
     return {
       holidays: Object.freeze([...autoFederal]),
-      ...STALE_CHECK_NON_HOLIDAY_DEFAULTS,
+      maxAgeDays: STALE_CHECK_MAX_AGE_DAYS_DEFAULT,
+      pingScheduleBusinessDays: Object.freeze([...STALE_CHECK_DEFAULT_PING_SCHEDULE]),
     };
   }
   if (typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -233,10 +278,8 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
 
   const root = parsed as {
     holidays?: unknown;
-    stale_threshold_business_days?: unknown;
     max_age_days?: unknown;
-    reping_interval_business_days?: unknown;
-    max_pings_per_pr?: unknown;
+    ping_schedule_business_days?: unknown;
   };
 
   // YAML holidays — additive extras. Validate strictly (same anchored ISO
@@ -271,37 +314,19 @@ export function loadStaleCheckConfig(yamlText: string): StaleCheckConfig {
   // declaration order.
   const merged = Object.freeze([...new Set([...autoFederal, ...yamlExtras])].sort());
 
-  const staleThresholdBusinessDays =
-    root.stale_threshold_business_days === undefined
-      ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.staleThresholdBusinessDays
-      : requireNonNegativeInteger(
-          'stale_threshold_business_days',
-          root.stale_threshold_business_days,
-        );
-
   const maxAgeDays =
     root.max_age_days === undefined
-      ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.maxAgeDays
+      ? STALE_CHECK_MAX_AGE_DAYS_DEFAULT
       : requirePositiveInteger('max_age_days', root.max_age_days);
 
-  const repingIntervalBusinessDays =
-    root.reping_interval_business_days === undefined
-      ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.repingIntervalBusinessDays
-      : requireNonNegativeInteger(
-          'reping_interval_business_days',
-          root.reping_interval_business_days,
-        );
-
-  const maxPingsPerPr =
-    root.max_pings_per_pr === undefined
-      ? STALE_CHECK_NON_HOLIDAY_DEFAULTS.maxPingsPerPr
-      : requirePositiveInteger('max_pings_per_pr', root.max_pings_per_pr);
+  const pingScheduleBusinessDays = parseAndValidatePingSchedule(
+    root.ping_schedule_business_days,
+    STALE_CHECK_DEFAULT_PING_SCHEDULE,
+  );
 
   return {
     holidays: merged,
-    staleThresholdBusinessDays,
     maxAgeDays,
-    repingIntervalBusinessDays,
-    maxPingsPerPr,
+    pingScheduleBusinessDays,
   };
 }
