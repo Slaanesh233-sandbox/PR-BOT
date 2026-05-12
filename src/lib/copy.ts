@@ -232,3 +232,73 @@ export function formatStalePingReply(args: {
   const ccTexts = [args.authorMention.text, ...args.reviewerMentions.map((m) => m.text)].join(' ');
   return `📬 this PR has been open for ${args.businessDaysOpen} business days.\n  cc ${ccTexts}`;
 }
+
+/**
+ * STALE-01 final-ping thread reply (Plan 03.1-05 — added 2026-05-12 per user
+ * verbatim direction in session 4):
+ *
+ *   "First ping should be happening after PR is opened for 1 week. Second on
+ *    3rd week. And final msg saying something like PR is already 1 month old,
+ *    final ping, and will no longer be tracked. Please author to escalate, etc."
+ *
+ * Fires once per PR on the LAST entry of `ping_schedule_business_days`. The
+ * dispatcher in src/index.ts detects this via
+ *   isFinal = (currentPingCount + 1) === schedule.length
+ * and selects this formatter instead of formatStalePingReply.
+ *
+ * Output template (renders the FOUR required surfaces locked by
+ * tests/copy.test.ts):
+ *
+ *   line 1: 📬 this PR has been open for {N} business days (~1 month). this is
+ *           the final automated ping — it will no longer be tracked from here.
+ *   line 2: (two-space indent) {author-mention} please escalate or close.
+ *   line 3 (only when reviewerMentions.length > 0): (two-space indent)
+ *           cc {reviewer1-mention} {reviewer2-mention} ...
+ *
+ * Required surfaces (asserted by tests):
+ *   - 📬 emoji prefix (U+1F4EC) — visual continuity with the intermediate
+ *     ping so recipients recognize the stale-ping channel at a glance.
+ *   - case-insensitive substring 'final' — terminal signal.
+ *   - case-insensitive substring 'no longer be tracked' — retirement signal
+ *     so the recipient understands the bot retires from this PR.
+ *   - case-insensitive substring 'escalate' — captures the user-verbatim
+ *     direction ("please author to escalate").
+ *   - the author-mention .text rendered on its own line, separate from any
+ *     cc clause so it reads as a direct address rather than a CC list item.
+ *
+ * Zero-reviewer edge case: line 3 (the `cc` clause) is OMITTED entirely;
+ * the author-direct address on line 2 carries the escalation ask alone.
+ *
+ * FLT-05 invariant: the formatter takes ALREADY-RESOLVED ResolvedMention
+ * objects and uses ONLY their .text property — it never constructs the
+ * Slack user-mention angle-bracket-at-U syntax. That monopoly lives in
+ * `mentions.ts` (Plan 01-03b). Both 'mapped' and 'fallback' kinds flow
+ * through unchanged; mapped produces a real Slack ping, fallback renders
+ * a plain @login literal that does not ping.
+ *
+ * STAT-01 re-lock 2026-05-08 invariant: this is a THREAD REPLY only — the
+ * function emits text only; the dispatcher MUST NOT add or remove a root
+ * reaction on the final ping (same as the intermediate ping).
+ *
+ * Throws RangeError for businessDaysOpen < 0 or non-integer (parity with
+ * formatStalePingReply's D2 live-fix floor relaxation).
+ */
+export function formatStaleFinalPingReply(args: {
+  readonly businessDaysOpen: number;
+  readonly authorMention: ResolvedMention;
+  readonly reviewerMentions: readonly ResolvedMention[];
+}): string {
+  if (!Number.isInteger(args.businessDaysOpen) || args.businessDaysOpen < 0) {
+    throw new RangeError(
+      `formatStaleFinalPingReply: businessDaysOpen must be a non-negative integer, got ${args.businessDaysOpen}`,
+    );
+  }
+  const header = `📬 this PR has been open for ${args.businessDaysOpen} business days (~1 month). this is the final automated ping — it will no longer be tracked from here.`;
+  const escalationLine = `  ${args.authorMention.text} please escalate or close.`;
+  if (args.reviewerMentions.length === 0) {
+    return `${header}\n${escalationLine}`;
+  }
+  const reviewerTexts = args.reviewerMentions.map((m) => m.text).join(' ');
+  const ccLine = `  cc ${reviewerTexts}`;
+  return `${header}\n${escalationLine}\n${ccLine}`;
+}
